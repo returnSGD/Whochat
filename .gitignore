@@ -1,0 +1,39 @@
+# 环境与密钥
+.env
+
+# 数据（体积大且含平台内容，不该进版本库）
+data/db/
+data/raw/
+data/exports/
+data/mc_out/
+*.db
+*.sqlite
+*.sqlite3
+
+# 采集基座：用 git clone 拉取，不作为本仓库内容提交
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 模型缓存
+models/
+*.gguf
+*.safetensors
+*.bin
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

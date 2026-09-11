@@ -1,0 +1,46 @@
+[project]
+name = "wochat"
+version = "0.1.0"
+description = "舆情分析 Agent —— 多平台采集 / 本地清洗 / 自动化分析 / 看板与预警"
+requires-python = ">=3.10"
+
+dependencies = [
+    "sqlalchemy>=2.0",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "jieba>=0.42.1",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# 看板
+web = ["streamlit>=1.40", "pandas>=2.2"]
+# 词云渲染（需要编译，装不上不影响主流程）
+viz = ["wordcloud>=1.9.3", "matplotlib>=3.8"]
+# 情感分析（torch 很重，按需装）
+sentiment = ["transformers>=4.44", "torch>=2.4"]
+# 本地模型清洗
+llm = ["ollama>=0.4", "instructor>=1.5", "json-repair>=0.30"]
+# 近重复去重
+dedup = ["datasketch>=1.6"]
+# 调度
+scheduler = ["apscheduler>=3.10"]
+# 主题建模
+topics = ["bertopic>=0.16", "umap-learn>=0.5", "hdbscan>=0.8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# vendor/ 下是 git clone 进来的 MediaCrawler，它自带的测试依赖第三方环境，
+# 收集它们只会报一堆与我们无关的错，直接排除。
+norecursedirs = ["vendor", "data", "dicts", ".venv", "build", "dist"]
+filterwarnings = [
+    # jieba 内部还在用 pkg_resources，与我们的代码无关
+    "ignore:pkg_resources is deprecated:UserWarning",
+]

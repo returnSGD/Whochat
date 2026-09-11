@@ -1,0 +1,28 @@
+# 统一换行符：仓库内存 LF，检出时按平台自动转换。
+# 本项目主要在 Windows 上开发，不加这个文件的话每次提交都会
+# 因为 CRLF/LF 差异产生大量假改动。
+* text=auto eol=lf
+
+# Windows 脚本必须保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制，不要碰
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.db binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+
+# 词表/标注集按文本处理，确保 diff 可读
+*.json text
+*.jsonl text
+*.txt text
+*.md text
+*.py text
+*.toml text
