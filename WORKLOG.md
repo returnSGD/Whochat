@@ -28,7 +28,7 @@
 | L4 存储 | 8 张表 + Repository 接口 | ✅ 已验证 |
 | L5 预警 | 快通道规则引擎 | ✅ 已验证 |
 | L5 预警 | 企微推送（聚合/分级/冷却/限流） | ✅ 已写，**只跑过 dry-run** |
-| L6 看板 | Streamlit :6666 | ⚠️ HTTP 200、连接泄漏已修，**图表渲染仍未经人眼确认** |
+| L6 看板 | Streamlit :8501 | ⚠️ 端口已从 :6666 改为 :8501（:6666 是浏览器禁用端口，见 §十四）；**图表渲染仍待本人用浏览器过目** |
 
 代码量：**约 5900 行**（`src/` 下 30 个 Python 文件）；**测试 130 个用例**（第二轮新增）
 
@@ -44,7 +44,7 @@ python -m Whochat.cli wordcloud     # wordcloud.png 1200×800
 python -m Whochat.cli evaluate      # 情感准确率 90.9%
 python -m Whochat.cli import ...    # JSONL 导入 + 字段归一化
 python -m Whochat.cli status        # 数据统计
-python -m Whochat.cli dashboard     # localhost:6666 → HTTP 200
+python -m Whochat.cli dashboard     # localhost:8501 → HTTP 200
 ```
 
 **关键验证点**：
@@ -416,7 +416,7 @@ README / `.env.example` 里"transformer 更准"的旧说法。
 | **本地 LLM 清洗** | `ollama pull qwen2.5:14b-instruct-q4_K_M` 且 `.env` 设 `WHOCHAT_LLM_ENABLED=true`（`ollama` 包本身也没装） |
 | **Transformer 情感后端** | 权重已下、链路已通，但实测只有 60.6%（模型是二分类，见 §9.4）—— **要换三分类模型才值得用** |
 | **建业务标注集 300~500 条** | 33 条只证明链路可用，**不是**准确率有 90.91% |
-| **看板图表人眼确认** | `python -m Whochat.cli dashboard` → localhost:6666 |
+| **看板图表人眼确认** | `python -m Whochat.cli dashboard` → localhost:8501 |
 
 > ⚠️ 顺手记一条**踩坑记录**：`python -m Whochat.cli init` 在 Git Bash 里
 > 看着是乱码，但那是管道按 UTF-8 解码造成的假象 —— 实测 Python 输出的是
@@ -620,4 +620,51 @@ web/app.py        入口（st.navigation）
 
 > ⚠️ 破坏性提示：若你在别处有 `.env` 或外部脚本，`WOCHAT_*` 环境变量名和
 > `python -m wochat.cli` 命令都需要一起改。
+
+---
+
+## 十四、看板默认端口 6666 → 8501（2026-09-12）
+
+第一次**真的用浏览器**打开看板时暴露的：`http://localhost:6666/dashboard`
+显示"无法访问此页面，网页似乎有问题"，而同一时刻 `curl` 返回 200、
+`netstat` 显示正常监听。
+
+### 14.1 原因：6666 是浏览器禁用端口
+
+Chrome / Edge / Firefox 都内置一份**受限端口清单**，6666 在列
+（`6665~6669` 原 IRC 端口段，浏览器为防止跨协议攻击而拒绝）。
+
+关键区别：**`curl` / `requests` 不检查这份清单**。所以服务端从头到尾都是好的 ——
+`init`、`status`、`pytest`、HTTP 200 全部正常，**唯独人打不开**。
+
+这也说明本轮之前所有"看板 HTTP 200"的验证都不构成"页面可用"的证据：
+默认端口从一开始就选错了，只是从来没人用浏览器试过。方案文档 §7.1 那句
+"localhost:6666 这个端口可以给 FastAPI"是随手定的，已一并更正。
+
+> 排查时也怀疑过 Clash 代理（实测走 7897 访问 6666 返回 502），但系统代理
+> `ProxyEnable=0` 且绕过列表已含 `localhost;127.*`，**代理不是本次原因**。
+
+### 14.2 改动
+
+| 位置 | 变更 |
+|---|---|
+| `config.py` | 新增 `WebConfig`（`WHOCHAT_DASHBOARD_PORT`，默认 `8501`）+ `dashboard_url` 属性 |
+| `cli.py` | `dashboard --port` 默认值改为 `settings.web.port` |
+| `alert/notifier.py` | 告警/日报里的"打开看板"链接不再硬编码，改用 `settings.web.dashboard_url` |
+| `.env.example` | 新增看板端口段，并写明禁用端口的坑 |
+| `web/app.py` | 启动注释 |
+| `tests/test_config.py` | 新增 4 条回归用例（含禁用端口清单断言） |
+| README / WORKLOG / 方案文档 | 全部 `:6666` 引用 |
+
+新增的回归用例钉住的不是"端口等于 8501"，而是**"默认端口不能落在浏览器禁用清单里"** ——
+这样将来有人改成 6667 之类的同样会被拦下。`WebConfig` 用 `default_factory` 而非裸默认值，
+否则 dataclass 默认值在导入时就固定了，环境变量改了也不生效（`StoreConfig` 同理）。
+
+### 14.3 验证
+
+- `python -m Whochat.cli dashboard`（不带 `--port`）默认起在 8501，
+  `netstat` 显示监听，`/dashboard` `/console` 均 `curl` 200
+- 8501 不在浏览器禁用端口清单内 —— 这是本次修复的依据
+- `pytest -q` **187 passed / 2 xfailed**（183 → 187，新增 4 条），无回归
+- ⚠️ **图表渲染仍待本人用浏览器过目** —— 端口通了不等于图画对了
 

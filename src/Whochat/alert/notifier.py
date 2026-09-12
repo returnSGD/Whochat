@@ -170,7 +170,7 @@ class WeComNotifier:
             lines.append(f"…另有 {len(alerts) - 7} 条规则命中，详见看板")
             lines.append("")
 
-        lines.append("[打开看板](http://localhost:6666)")
+        lines.append(f"[打开看板]({settings.web.dashboard_url})")
 
         return self._truncate_bytes("\n".join(lines), self.max_bytes)
 
@@ -327,6 +327,6 @@ def build_daily_digest(
         "",
         f"**累计数据**：内容 {stats['contents']} · 评论 {stats['comments']} · 分析 {stats['analyses']}",
         "",
-        "[打开看板](http://localhost:6666)",
+        f"[打开看板]({settings.web.dashboard_url})",
     ]
     return "\n".join(lines)

@@ -20,13 +20,18 @@ python -m Whochat.cli init
 python -m Whochat.cli demo
 
 # 3. 可视化（双入口：看板端 / 操作端）
-python -m Whochat.cli dashboard          # → http://localhost:6666
+python -m Whochat.cli dashboard          # → http://localhost:8501
 #   /dashboard  看板端 —— 只读：趋势/情感/主题/词云/传播/预警记录
 #   /console    操作端 —— 可写：L1~L5 触发与微调（采集/分析/规则/推送）
 
-# 4. 回归测试（183 个用例，约 19 秒）
+# 4. 回归测试（187 个用例，约 20 秒）
 python -m pytest -q
 ```
+
+> ⚠️ **端口别选浏览器禁用端口**（`6665~6669` 等原 IRC 端口段在内）。
+> 浏览器会在建连前直接拒绝，报"无法访问此页面"；而 `curl` / `requests`
+> 不检查这份清单，服务端一切正常 —— 于是 HTTP 200 会给人"页面没问题"的错觉。
+> 默认端口是 8501，改端口用 `--port` 或 `WHOCHAT_DASHBOARD_PORT`。
 
 `demo` 能跑通，说明整条业务链路是好的。之后逐步换成真实数据源。
 
@@ -79,7 +84,7 @@ L3 分析  规则引擎        情感分析 · BERTopic · 词云 · 时序
 L4 存储   Repository 统一读写接口  ← 事实上的"中台"边界
               ↓
        ┌──────┴──────┐
-L5 预警   聚合·分级·冷却      L6 看板  FastAPI/Streamlit :6666
+L5 预警   聚合·分级·冷却      L6 看板  FastAPI/Streamlit :8501
        → 企微机器人
 ```
 

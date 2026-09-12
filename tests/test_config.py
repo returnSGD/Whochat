@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from Whochat.config import ROOT, _abs_from_root, _env_bool, _resolve_db_url
+from Whochat.config import (
+    ROOT,
+    WebConfig,
+    _abs_from_root,
+    _env_bool,
+    _resolve_db_url,
+    settings,
+)
 
 
 class TestEnvBool:
@@ -69,3 +76,35 @@ class TestResolveDbUrl:
         monkeypatch.delenv("WHOCHAT_DB_URL", raising=False)
         url = _resolve_db_url()
         assert Path(url[len("sqlite:///") :]).is_absolute()
+
+
+# 浏览器（Chromium 系 / Firefox）的受限端口清单：这些端口在建连前就被拒绝，
+# 报"无法访问此页面"；而 curl / requests 不检查该清单，服务端看起来完全正常。
+# 正是这个差异让默认端口 6666 长期没被发现（见 WORKLOG §十四）。
+BROWSER_BLOCKED_PORTS = {
+    *range(1, 1024),  # 特权端口
+    2049, 3659, 4045, 5060, 5061, 6000, 6566,
+    *range(6665, 6670),  # 原 IRC 段 —— 6666 就在这里
+    6697, 10080,
+}
+
+
+class TestDashboardPort:
+    def test_default_port_is_not_browser_blocked(self, monkeypatch):
+        """回归：默认端口必须能被浏览器打开。
+
+        `curl` 拿到 200 只证明服务端在监听，**不证明人能打开** ——
+        这就是 6666 一直没被发现的原因。"""
+        monkeypatch.delenv("WHOCHAT_DASHBOARD_PORT", raising=False)
+        assert WebConfig().port not in BROWSER_BLOCKED_PORTS
+
+    def test_dashboard_url_matches_configured_port(self, monkeypatch):
+        monkeypatch.setenv("WHOCHAT_DASHBOARD_PORT", "9001")
+        assert WebConfig().dashboard_url == "http://localhost:9001"
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("WHOCHAT_DASHBOARD_PORT", "9002")
+        assert WebConfig().port == 9002
+
+    def test_settings_wires_web_config(self):
+        assert isinstance(settings.web, WebConfig)

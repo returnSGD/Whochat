@@ -161,6 +161,30 @@ class AlertConfig:
     retry_max_age_seconds: int = int(os.getenv("WHOCHAT_ALERT_RETRY_MAX_AGE", "21600"))
 
 
+@dataclass
+class WebConfig:
+    """看板配置。
+
+    ⚠️ 端口不能选浏览器禁用端口。Chrome / Edge / Firefox 内置一份禁用端口
+    清单（6665~6669 等原 IRC 端口段也在其中），浏览器在建立连接前就拒绝，
+    显示"无法访问此页面"。而 curl / requests 不检查这份清单，服务端一切正常
+    —— 于是 HTTP 200 会给人"页面没问题"的错觉。默认改用 8501。
+
+    另注意 MediaCrawler 自带 WebUI 占 8080，别撞。
+    """
+
+    # 用 default_factory 而不是裸默认值：dataclass 的默认值在**导入时**求值一次，
+    # 之后改环境变量不会重新读（StoreConfig 同理）。
+    port: int = field(
+        default_factory=lambda: int(os.getenv("WHOCHAT_DASHBOARD_PORT", "8501"))
+    )
+
+    @property
+    def dashboard_url(self) -> str:
+        """给推送消息里附的看板链接用。"""
+        return f"http://localhost:{self.port}"
+
+
 def _resolve_db_url() -> str:
     """数据库连接串。相对 sqlite 路径锚定到项目根目录。
 
@@ -199,6 +223,7 @@ class Settings:
     sentiment: SentimentConfig = field(default_factory=SentimentConfig)
     alert: AlertConfig = field(default_factory=AlertConfig)
     store: StoreConfig = field(default_factory=StoreConfig)
+    web: WebConfig = field(default_factory=WebConfig)
 
 
 settings = Settings()

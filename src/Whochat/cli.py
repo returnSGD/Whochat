@@ -545,7 +545,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="查看数据统计").set_defaults(func=cmd_status)
 
     dash = sub.add_parser("dashboard", help="启动看板")
-    dash.add_argument("--port", type=int, default=6666, help="端口，默认 6666")
+    dash.add_argument(
+        "--port", type=int, default=settings.web.port,
+        help=f"端口，默认 {settings.web.port}（可用 WHOCHAT_DASHBOARD_PORT 改）",
+    )
     dash.set_defaults(func=cmd_dashboard)
 
     e = sub.add_parser("evaluate", help="在标注集上评估情感分析准确率")

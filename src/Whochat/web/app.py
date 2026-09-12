@@ -8,7 +8,7 @@
 或改掉预警规则。
 
 启动：
-    python -m Whochat.cli dashboard      # → http://localhost:6666
+    python -m Whochat.cli dashboard      # → http://localhost:8501
     # 直接打开某个入口：/dashboard 或 /console
 """
 
