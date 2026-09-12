@@ -4,7 +4,11 @@
 
 > 设计文档见 [`舆情分析Agent_整体方案.md`](舆情分析Agent_整体方案.md)（架构、选型理由、ADR、风险清单）。
 
+- 介绍链接：https://whochatting.pages.dev/
+
 ---
+
+
 
 ## 快速开始
 
