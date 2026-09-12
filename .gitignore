@@ -6,6 +6,7 @@ data/db/
 data/raw/
 data/exports/
 data/mc_out/
+data/logs/
 *.db
 *.sqlite
 *.sqlite3

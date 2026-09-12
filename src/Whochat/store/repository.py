@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
-from sqlalchemy import create_engine, delete, func, select
+from sqlalchemy import create_engine, delete, event, func, inspect, or_, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from Whochat.config import settings
@@ -38,10 +38,24 @@ def get_engine():
     global _engine
     if _engine is None:
         kwargs: dict[str, Any] = {"echo": settings.store.echo, "future": True}
-        if settings.store.url.startswith("sqlite"):
-            # SQLite 多线程访问（Streamlit / APScheduler 并发）
-            kwargs["connect_args"] = {"check_same_thread": False}
+        is_sqlite = settings.store.url.startswith("sqlite")
+        if is_sqlite:
+            # SQLite 多线程访问（Streamlit / APScheduler 并发）。
+            # timeout 让写锁冲突时**等待**而不是立刻抛 "database is locked"。
+            kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
         _engine = create_engine(settings.store.url, **kwargs)
+
+        if is_sqlite:
+            # WAL：读写不互相阻塞。长期运行时采集（写）与看板（读）会并发，
+            # 默认的 rollback journal 模式下读会被写挡死，看板卡顿甚至超时。
+            # busy_timeout 与 connect_args.timeout 双保险（不同驱动路径生效点不同）。
+            @event.listens_for(_engine, "connect")
+            def _set_sqlite_pragma(dbapi_conn, _record):  # pragma: no cover - 驱动回调
+                cur = dbapi_conn.cursor()
+                cur.execute("PRAGMA journal_mode=WAL")
+                cur.execute("PRAGMA synchronous=NORMAL")
+                cur.execute("PRAGMA busy_timeout=30000")
+                cur.close()
     return _engine
 
 
@@ -52,9 +66,36 @@ def get_session() -> Session:
     return _SessionFactory()
 
 
+# 增量迁移：`create_all` 只会建缺失的**表**，不会给已存在的表加列。
+# 老库升级时若不补这几列，周期监控会直接报 "no such column: crawl_tasks.enabled"。
+# 只做加列（幂等、无损），不碰已有数据。
+_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("crawl_tasks", "enabled", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("crawl_tasks", "interval_seconds", "INTEGER NOT NULL DEFAULT 1800"),
+    ("crawl_tasks", "last_run_at", "DATETIME"),
+    ("crawl_tasks", "next_run_at", "DATETIME"),
+    ("crawl_tasks", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
+def _ensure_columns(engine) -> None:
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table, column, ddl in _MIGRATIONS:
+            if table not in existing_tables:
+                continue
+            columns = {c["name"] for c in inspector.get_columns(table)}
+            if column in columns:
+                continue
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+
+
 def init_db() -> None:
-    """建表。幂等，可重复调用。"""
-    Base.metadata.create_all(get_engine())
+    """建表 + 增量迁移。幂等，可重复调用。"""
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    _ensure_columns(engine)
 
 
 # ============================================================ 时区工具
@@ -621,7 +662,7 @@ class Repository:
             self.session.commit()
         return len(rows)
 
-    # -------------------------------------------------- 采集任务
+    # -------------------------------------------------- 采集任务（含周期监控）
 
     def upsert_task(self, platform: str, mode: str, target: str, **kwargs) -> CrawlTask:
         task = self.session.scalars(
@@ -638,3 +679,247 @@ class Repository:
             task.updated_at = utcnow()
         self.session.commit()
         return task
+
+    def add_watch_tasks(
+        self,
+        platform: str,
+        keywords: Iterable[str],
+        *,
+        interval_seconds: int = 1800,
+        mode: str = "keyword",
+        enabled: bool = True,
+    ) -> tuple[int, int]:
+        """批量加入监控。返回 (新建, 已存在被更新)。
+
+        幂等：同一个 (platform, mode, target) 走唯一约束，重复导入不会建重复任务。
+        已禁用的任务重新加入时**会重新启用并立即排期**，但不会重置已有任务的
+        `next_run_at` —— 否则每次重新导入都会让全部关键词同时到期，形成冲击。
+        """
+        created = updated = 0
+        for raw in keywords:
+            kw = (raw or "").strip()
+            if not kw or kw.startswith("#"):
+                continue
+            existing = self.session.scalars(
+                select(CrawlTask).where(
+                    CrawlTask.platform == platform,
+                    CrawlTask.mode == mode,
+                    CrawlTask.target == kw,
+                )
+            ).first()
+            if existing is None:
+                self.session.add(
+                    CrawlTask(
+                        platform=platform,
+                        mode=mode,
+                        target=kw,
+                        interval_seconds=int(interval_seconds),
+                        enabled=enabled,
+                        next_run_at=None,  # NULL = 立即到期
+                    )
+                )
+                created += 1
+            else:
+                was_enabled = bool(existing.enabled)
+                existing.interval_seconds = int(interval_seconds)
+                existing.enabled = enabled
+                if enabled and not was_enabled:
+                    existing.next_run_at = None  # 重新启用 → 尽快跑一次
+                existing.updated_at = utcnow()
+                updated += 1
+        self.session.commit()
+        return created, updated
+
+    def due_crawl_tasks(self, now: datetime | None = None, limit: int = 200) -> list[CrawlTask]:
+        """到期的监控任务 —— 调度器每轮消费的就是它们。
+
+        `next_run_at IS NULL` 视为立即到期（新加的词 / 旧数据）。
+        排除 running：正在跑的不重复派发。进程崩溃残留的 running 由
+        `reset_stale_running` 回收。
+        """
+        now = now or utcnow()
+        return list(
+            self.session.scalars(
+                select(CrawlTask)
+                .where(
+                    CrawlTask.enabled.is_(True),
+                    CrawlTask.status != "running",
+                    or_(CrawlTask.next_run_at.is_(None), CrawlTask.next_run_at <= now),
+                )
+                # NULL（从未跑过）排最前；SQLite ASC 下 NULL 本就排最前
+                .order_by(CrawlTask.next_run_at.asc(), CrawlTask.created_at.asc())
+                .limit(limit)
+            )
+        )
+
+    def mark_task_running(self, task_ids: Sequence[str]) -> None:
+        for tid in task_ids:
+            task = self.session.get(CrawlTask, tid)
+            if task is not None:
+                task.status = "running"
+        self.session.commit()
+
+    def mark_task_result(
+        self, task_id: str, *, ok: bool, items: int = 0, error: str | None = None
+    ) -> None:
+        """一次采集结束后的排期。周期任务在这里**重新入队** —— 这是"持续监测"的落点。
+
+        失败不关闭监控，但按连续失败次数退避（最长 6 小时），
+        避免一个坏关键词以固定频率反复重试、挤占正常词的采集窗口。
+        """
+        task = self.session.get(CrawlTask, task_id)
+        if task is None:
+            return
+        now = utcnow()
+        task.last_run_at = now
+        task.updated_at = now
+        task.items_collected = (task.items_collected or 0) + max(0, int(items))
+
+        interval = int(task.interval_seconds or 0)
+        if ok:
+            task.status = "done"
+            task.consecutive_failures = 0
+            task.error = None
+        else:
+            task.status = "failed"
+            task.consecutive_failures = int(task.consecutive_failures or 0) + 1
+            task.error = (error or "")[:500]
+
+        if interval > 0:
+            delay = interval
+            if not ok:
+                # 1 次失败 ×2、2 次 ×4、3 次及以上 ×8，封顶 6 小时
+                delay = min(interval * (2 ** min(task.consecutive_failures - 1, 3)), 21600)
+            task.next_run_at = now + timedelta(seconds=delay)
+        else:
+            # 一次性任务：跑完即止
+            task.next_run_at = None
+            task.enabled = False
+        self.session.commit()
+
+    def reset_stale_running(self, older_than_seconds: int) -> int:
+        """回收崩溃残留的 running 任务。
+
+        进程在采集途中被 kill 时，任务会停在 running；而到期查询会跳过
+        running，若不回收，这个关键词就**永远不会再被采集**，且没有任何报错。
+        用 updated_at（mark_task_running 会刷新）判断是否已超时。
+        """
+        cutoff = utcnow() - timedelta(seconds=older_than_seconds)
+        rows = list(
+            self.session.scalars(
+                select(CrawlTask).where(
+                    CrawlTask.status == "running", CrawlTask.updated_at < cutoff
+                )
+            )
+        )
+        for t in rows:
+            t.status = "pending"
+            t.error = "上次运行未正常结束（进程中断），已重新排期"
+        if rows:
+            self.session.commit()
+        return len(rows)
+
+    def list_crawl_tasks(
+        self, platform: str | None = None, limit: int = 500
+    ) -> list[CrawlTask]:
+        stmt = select(CrawlTask).order_by(
+            CrawlTask.enabled.desc(), CrawlTask.next_run_at.asc(), CrawlTask.target.asc()
+        )
+        if platform:
+            stmt = stmt.where(CrawlTask.platform == platform)
+        return list(self.session.scalars(stmt.limit(limit)))
+
+    def watch_summary(self) -> dict[str, int]:
+        """监控规模与健康度 —— 看板/操作端/调度器启动日志都用它。"""
+        now = utcnow()
+        total = self.session.scalar(select(func.count()).select_from(CrawlTask)) or 0
+        enabled = (
+            self.session.scalar(
+                select(func.count()).select_from(CrawlTask).where(CrawlTask.enabled.is_(True))
+            )
+            or 0
+        )
+        due = (
+            self.session.scalar(
+                select(func.count())
+                .select_from(CrawlTask)
+                .where(
+                    CrawlTask.enabled.is_(True),
+                    CrawlTask.status != "running",
+                    or_(CrawlTask.next_run_at.is_(None), CrawlTask.next_run_at <= now),
+                )
+            )
+            or 0
+        )
+        failing = (
+            self.session.scalar(
+                select(func.count())
+                .select_from(CrawlTask)
+                .where(CrawlTask.enabled.is_(True), CrawlTask.consecutive_failures > 0)
+            )
+            or 0
+        )
+        running = (
+            self.session.scalar(
+                select(func.count()).select_from(CrawlTask).where(CrawlTask.status == "running")
+            )
+            or 0
+        )
+        return {
+            "total": total,
+            "enabled": enabled,
+            "due": due,
+            "failing": failing,
+            "running": running,
+        }
+
+    def set_task_enabled(self, task_id: str, enabled: bool) -> bool:
+        task = self.session.get(CrawlTask, task_id)
+        if task is None:
+            return False
+        task.enabled = enabled
+        if enabled:
+            # 重新启用时立即排期一次，否则要等到原来的 next_run_at 才动
+            task.next_run_at = None
+            task.consecutive_failures = 0
+            task.error = None
+        task.updated_at = utcnow()
+        self.session.commit()
+        return True
+
+    def delete_crawl_tasks(
+        self, *, task_ids: Sequence[str] | None = None, platform: str | None = None
+    ) -> int:
+        """删除监控任务。必须显式给 task_ids 或 platform，避免误删全表。"""
+        if not task_ids and not platform:
+            return 0
+        stmt = delete(CrawlTask)
+        if task_ids:
+            stmt = stmt.where(CrawlTask.task_id.in_(list(task_ids)))
+        elif platform:
+            stmt = stmt.where(CrawlTask.platform == platform)
+        result = self.session.execute(stmt)
+        self.session.commit()
+        return int(result.rowcount or 0)
+
+    # -------------------------------------------------- 数据保留（长期运营）
+
+    def prune_snapshots(self, older_than_days: int, dry_run: bool = False) -> int:
+        """清理过老的指标快照。
+
+        `metric_snapshots` 每次采集都写一行且**只增不减**，长期跑必然膨胀
+        （100 个关键词 × 每天若干轮）。传播曲线只需要近期点，老快照留着
+        只拖慢查询、占磁盘。默认只统计不删除（dry-run），由调用方显式确认。
+        """
+        cutoff = utcnow() - timedelta(days=older_than_days)
+        cond = MetricSnapshot.snapshot_time < cutoff
+        if dry_run:
+            return int(
+                self.session.scalar(
+                    select(func.count()).select_from(MetricSnapshot).where(cond)
+                )
+                or 0
+            )
+        result = self.session.execute(delete(MetricSnapshot).where(cond))
+        self.session.commit()
+        return int(result.rowcount or 0)

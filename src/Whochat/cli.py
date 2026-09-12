@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from Whochat.config import EXPORT_DIR, ROOT, settings
@@ -261,6 +262,134 @@ def cmd_crawl(args) -> int:
     return 0
 
 
+def _collect_keywords(args) -> list[str] | None:
+    """从 --keyword / --file 收集关键词，去重保序。
+
+    文件一行一个，UTF-8 BOM 用 utf-8-sig 吃掉（Excel 导出的 txt 常带 BOM，
+    否则第一个关键词会凭空多出 \\ufeff 前缀，采集命不中）。
+    """
+    words = list(getattr(args, "keyword", None) or [])
+    for path_str in getattr(args, "file", None) or []:
+        path = Path(path_str)
+        if not path.exists():
+            print(f"关键词文件不存在: {path}")
+            return None
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            s = line.strip()
+            if s and not s.startswith("#"):
+                words.append(s)
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
+def cmd_keywords(args) -> int:
+    """监控关键词的批量管理 —— 支撑"长期监测 100 个关键词"。"""
+    repo = _repo()
+    action = args.action
+
+    if action == "add":
+        words = _collect_keywords(args)
+        if words is None:
+            return 1
+        platforms = list(args.platform or [])
+        if not words:
+            print("没有可加入的关键词。用 --keyword 或 --file 提供。")
+            return 1
+        if not platforms:
+            print("必须指定 --platform（可重复）")
+            return 1
+        _banner(f"加入监控：{len(words)} 个关键词 × {len(platforms)} 个平台")
+        created = updated = 0
+        for platform in platforms:
+            c, u = repo.add_watch_tasks(
+                platform,
+                words,
+                interval_seconds=args.interval,
+                enabled=not args.disabled,
+            )
+            created += c
+            updated += u
+            print(f"  {platform:<10} 新建 {c} / 更新 {u}")
+        print(f"\n合计：新建 {created}，更新 {updated}")
+        print(f"数据库任务总数：{repo.watch_summary()['total']}")
+        if args.disabled:
+            print("已加入但未启用（`keywords enable` 可启用）")
+        else:
+            print("调度器下一轮会开始采集。查看: python -m Whochat.cli keywords status")
+        return 0
+
+    if action == "list":
+        rows = repo.list_crawl_tasks(platform=args.platform)
+        if not rows:
+            print("没有监控任务。用 `keywords add` 添加。")
+            return 0
+        print(f"{'平台':<10}{'目标':<24}{'状态':<9}{'启用':<5}{'间隔s':<8}{'失败':<5}{'下次':<20}{'错误'}")
+        print("-" * 100)
+        for t in rows:
+            nxt = t.next_run_at.strftime("%m-%d %H:%M") if t.next_run_at else "立即"
+            print(
+                f"{t.platform:<10}{t.target[:22]:<24}{t.status:<9}"
+                f"{'是' if t.enabled else '否':<5}{t.interval_seconds:<8}"
+                f"{t.consecutive_failures:<5}{nxt:<20}{(t.error or '')[:20]}"
+            )
+        return 0
+
+    if action == "status":
+        s = repo.watch_summary()
+        _banner("监控状态")
+        print(f"  任务总数    : {s['total']}")
+        print(f"  启用中      : {s['enabled']}")
+        print(f"  待跑（到期）: {s['due']}")
+        print(f"  运行中      : {s['running']}")
+        print(f"  连续失败    : {s['failing']}")
+        print(f"\n  采集并发    : {settings.crawl.concurrency}（WHOCHAT_CRAWL_CONCURRENCY）")
+        print(f"  单任务超时  : {settings.crawl.timeout_seconds}s（WHOCHAT_CRAWL_TIMEOUT）")
+        if s["due"] > 0:
+            print(
+                "\n  ⚠️ 有到期未跑的任务。到期数长期 >0 说明监测频率跟不上："
+                "\n     提高并发，或调大各关键词的采集间隔。"
+            )
+        return 0
+
+    if action in ("enable", "disable"):
+        enable = action == "enable"
+        ids = list(args.task_id or [])
+        if args.platform:
+            ids += [t.task_id for t in repo.list_crawl_tasks(platform=args.platform)]
+        if not ids:
+            print("用 --task-id 或 --platform 指定要操作的任务。")
+            return 1
+        changed = sum(1 for tid in ids if repo.set_task_enabled(tid, enable))
+        print(f"已{'启用' if enable else '停用'} {changed} 个任务")
+        return 0
+
+    if action == "rm":
+        ids = list(args.task_id or [])
+        if args.platform:
+            if not args.all:
+                print("按平台批量删除需同时加 --all（避免误删）。")
+                return 1
+            if not args.yes:
+                print("批量删除不可撤销，确认请加 --yes。")
+                return 1
+        if not ids and not args.platform:
+            print("用 --task-id 或 --platform --all 指定要删除的任务。")
+            return 1
+        n = repo.delete_crawl_tasks(
+            task_ids=ids or None, platform=args.platform if args.all else None
+        )
+        print(f"已删除 {n} 个任务")
+        return 0
+
+    print(f"未知操作: {action}")
+    return 1
+
+
 def cmd_import(args) -> int:
     _banner(f"导入 {args.path}")
     from Whochat.crawler.base import CrawlTask, register
@@ -444,6 +573,57 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_maintenance(args) -> int:
+    """数据保留 —— 长期运营时控制磁盘/查询膨胀。
+
+    默认**试运行**（只报告将删除什么），确认后加 `--yes` 才真删。
+    原始 JSONL 是"采集不可逆"的兜底，删了就无法从磁盘恢复 —— 谨慎使用。
+    """
+    from Whochat.config import RAW_DIR
+
+    _banner("数据维护")
+    repo = _repo()
+    planned = False
+
+    if args.prune_snapshots_days:
+        n = repo.prune_snapshots(args.prune_snapshots_days, dry_run=not args.yes)
+        print(
+            f"{'已删除' if args.yes else '将删除'} {n} 条早于 "
+            f"{args.prune_snapshots_days} 天的指标快照"
+        )
+        planned = planned or not args.yes
+
+    if args.prune_raw_days:
+        cutoff = time.time() - args.prune_raw_days * 86400
+        files = [p for p in Path(RAW_DIR).glob("*.jsonl") if p.stat().st_mtime < cutoff]
+        size_mb = sum(p.stat().st_size for p in files) / 1e6
+        print(
+            f"{'已删除' if args.yes else '将删除'} {len(files)} 个原始 JSONL"
+            f"（{size_mb:.1f} MB，早于 {args.prune_raw_days} 天）"
+        )
+        if args.yes:
+            for p in files:
+                try:
+                    p.unlink()
+                except OSError as e:
+                    print(f"  删除失败 {p}: {e}")
+        else:
+            planned = True
+
+    if not (args.prune_snapshots_days or args.prune_raw_days):
+        print("没有指定清理项。")
+        print("示例：")
+        print("  # 试运行（只报告）")
+        print("  python -m Whochat.cli maintenance --prune-snapshots-days 90 --prune-raw-days 180")
+        print("  # 确认执行")
+        print("  python -m Whochat.cli maintenance --prune-snapshots-days 90 --prune-raw-days 180 --yes")
+        return 0
+
+    if planned:
+        print("\n以上为试运行。确认执行请加 --yes。")
+    return 0
+
+
 def cmd_dashboard(args) -> int:
     """启动 Streamlit 看板。"""
     import subprocess
@@ -530,6 +710,40 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--no-sub-comments", action="store_true", help="不抓二级评论")
     c.set_defaults(func=cmd_crawl)
 
+    # ---- 监控关键词批量管理（长期监测 100+ 词靠它）----
+    kw = sub.add_parser("keywords", help="监控关键词批量管理（加入/启停/查看）")
+    ks = kw.add_subparsers(dest="action", required=True)
+
+    ka = ks.add_parser("add", help="批量加入监控（一行一个关键词）")
+    ka.add_argument("--platform", action="append", default=[], help="可重复；每个平台各建一套任务")
+    ka.add_argument("--keyword", action="append", default=[], help="单个关键词，可重复")
+    ka.add_argument("--file", action="append", default=[], help="关键词文件，一行一个（# 为注释）")
+    ka.add_argument(
+        "--interval", type=int, default=settings.crawl.default_interval_seconds,
+        help=f"采集间隔（秒），默认 {settings.crawl.default_interval_seconds}",
+    )
+    ka.add_argument("--disabled", action="store_true", help="只加入不启用")
+    ka.set_defaults(func=cmd_keywords)
+
+    kl = ks.add_parser("list", help="列出监控任务")
+    kl.add_argument("--platform", default=None)
+    kl.set_defaults(func=cmd_keywords)
+
+    ks.add_parser("status", help="监控规模与健康度").set_defaults(func=cmd_keywords)
+
+    for _name, _help in (("enable", "启用监控任务"), ("disable", "停用监控任务")):
+        sp = ks.add_parser(_name, help=_help)
+        sp.add_argument("--task-id", action="append", default=[], help="可重复")
+        sp.add_argument("--platform", default=None, help="该平台下全部任务")
+        sp.set_defaults(func=cmd_keywords)
+
+    kr = ks.add_parser("rm", help="删除监控任务")
+    kr.add_argument("--task-id", action="append", default=[], help="可重复")
+    kr.add_argument("--platform", default=None)
+    kr.add_argument("--all", action="store_true", help="配合 --platform 删除该平台全部任务")
+    kr.add_argument("--yes", action="store_true", help="确认批量删除")
+    kr.set_defaults(func=cmd_keywords)
+
     i = sub.add_parser("import", help="导入本地 JSONL/JSON/CSV")
     i.add_argument("path", help="文件路径")
     i.add_argument("--platform", default="unknown")
@@ -567,6 +781,12 @@ def build_parser() -> argparse.ArgumentParser:
     al.set_defaults(func=cmd_alert)
 
     sub.add_parser("status", help="查看数据统计").set_defaults(func=cmd_status)
+
+    m = sub.add_parser("maintenance", help="数据保留：清理老快照/原始文件（默认试运行）")
+    m.add_argument("--prune-snapshots-days", type=int, default=None, help="删除早于 N 天的指标快照")
+    m.add_argument("--prune-raw-days", type=int, default=None, help="删除早于 N 天的原始 JSONL")
+    m.add_argument("--yes", action="store_true", help="确认执行（不加则只报告将删除什么）")
+    m.set_defaults(func=cmd_maintenance)
 
     dash = sub.add_parser("dashboard", help="启动看板")
     dash.add_argument(

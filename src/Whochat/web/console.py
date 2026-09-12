@@ -24,7 +24,7 @@ import streamlit as st  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
 from Whochat.config import ROOT, settings  # noqa: E402
-from Whochat.store.models import Alert, AnalysisResult, CrawlTask  # noqa: E402
+from Whochat.store.models import Alert, AnalysisResult  # noqa: E402
 from Whochat.store.repository import Repository, init_db  # noqa: E402
 
 
@@ -237,28 +237,120 @@ def tab_crawl() -> None:
         _show_result(code, out, "导入完成")
 
     st.divider()
-    st.markdown("#### 采集任务队列")
-    st.caption("调度器（`python -m Whochat.scheduler.jobs`）会周期性消费 status 为 pending/running 的任务。")
-    rows = _query(
-        lambda r: [
-            {
-                "task_id": t.task_id,
-                "平台": t.platform,
-                "模式": t.mode,
-                "目标": t.target,
-                "状态": t.status,
-                "已采集": t.items_collected,
-                "错误": (t.error or "")[:60],
-            }
-            for t in r.session.scalars(select(CrawlTask)).all()
-        ]
+    st.markdown("#### 关键词监控（长期监测）")
+    st.caption(
+        "一行一个关键词，可多选平台。加入后调度器按间隔**持续**采集 —— "
+        "任务跑完会自动排下一次，不像一次性 `crawl` 那样跑完即止。"
     )
-    if rows:
+    with st.form("watch_form"):
+        c1, c2 = st.columns([3, 2])
+        watch_text = c1.text_area(
+            "关键词（一行一个，# 开头为注释）",
+            height=140,
+            placeholder="某品牌\n某型号\n竞品名",
+        )
+        watch_platforms = c2.multiselect(
+            "平台",
+            ["xhs", "douyin", "kuaishou", "bilibili", "weibo", "tieba", "zhihu"],
+            default=["xhs"],
+        )
+        c3, c4, c5 = st.columns(3)
+        watch_interval = c3.number_input(
+            "采集间隔（秒）",
+            min_value=60,
+            max_value=86400,
+            value=int(settings.crawl.default_interval_seconds),
+            step=60,
+        )
+        watch_enabled = c4.checkbox("加入后启用", value=True)
+        watch_submit = c5.form_submit_button("加入监控", type="primary")
+
+    if watch_submit:
+        kws = [
+            ln.strip()
+            for ln in (watch_text or "").splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        if not kws:
+            st.error("请至少填一个关键词。")
+        elif not watch_platforms:
+            st.error("请至少选一个平台。")
+        else:
+            created = updated = 0
+            for p in watch_platforms:
+                c, u = _query(
+                    lambda r, p=p: r.add_watch_tasks(
+                        p, kws, interval_seconds=int(watch_interval), enabled=watch_enabled
+                    )
+                )
+                created += c
+                updated += u
+            st.success(
+                f"已加入 {len(kws)} 个词 × {len(watch_platforms)} 个平台："
+                f"新建 {created}，更新 {updated}"
+            )
+            st.rerun()
+
+    summary = _query(lambda r: r.watch_summary())
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("监控任务", summary["total"])
+    m2.metric("启用", summary["enabled"])
+    m3.metric("待跑", summary["due"])
+    m4.metric("连续失败", summary["failing"])
+    if summary["failing"]:
+        st.warning(
+            "有任务在连续失败。采集被风控是常态，系统会自动退避重试；"
+            "若持续多天零产出，检查登录态或换个采集时段。"
+        )
+    if summary["due"] > 0 and summary["enabled"] > 0:
+        st.caption(
+            f"待跑 {summary['due']} 个：说明上一轮没跑完/间隔偏短。"
+            "提高 `WHOCHAT_CRAWL_CONCURRENCY` 或调大间隔，否则监测频率会走低。"
+        )
+
+    tasks = _query(lambda r: r.list_crawl_tasks(limit=1000))
+    if tasks:
         import pandas as pd
 
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "task_id": t.task_id,
+                        "平台": t.platform,
+                        "目标": t.target,
+                        "状态": t.status,
+                        "启用": bool(t.enabled),
+                        "间隔(s)": t.interval_seconds,
+                        "失败": t.consecutive_failures,
+                        "下次": t.next_run_at.strftime("%m-%d %H:%M") if t.next_run_at else "立即",
+                        "错误": (t.error or "")[:40],
+                    }
+                    for t in tasks
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+        labels = {t.task_id: f"{t.platform} / {t.target}" for t in tasks}
+        sel = st.selectbox(
+            "选择任务进行启停 / 删除", options=list(labels),
+            format_func=lambda x: labels.get(x, x),
+        )
+        b1, b2, _ = st.columns([1, 1, 3])
+        if b1.button("启用 / 停用"):
+            current = next(t for t in tasks if t.task_id == sel)
+            _query(lambda r: r.set_task_enabled(sel, not bool(current.enabled)))
+            st.rerun()
+        if b2.button("删除该任务"):
+            _query(lambda r: r.delete_crawl_tasks(task_ids=[sel]))
+            st.warning(f"已删除 {labels.get(sel, sel)}")
+            st.rerun()
     else:
-        st.caption("队列为空。CLI 的 `crawl` 是即时执行、不写队列；队列只给调度器用。")
+        st.caption(
+            "还没有监控任务。上面填关键词加入，或用 CLI："
+            "`python -m Whochat.cli keywords add --platform xhs --file kws.txt`"
+        )
 
     st.divider()
     st.markdown("#### 链路自检")

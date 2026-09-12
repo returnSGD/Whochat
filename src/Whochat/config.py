@@ -173,14 +173,40 @@ class ProxyConfig:
 class CrawlConfig:
     """采集参数。限速是硬要求，不要为提速把它调小。"""
 
-    # 每个请求之间的最小间隔（秒）。低于 3 秒会显著提高被封概率。
+    # 连续两个采集任务**启动**之间的最小间隔（秒）。低于 3 秒会显著提高被封概率。
     min_interval: float = float(os.getenv("WHOCHAT_CRAWL_INTERVAL", "4.0"))
     # 单次任务最多抓多少条
     max_items: int = int(os.getenv("WHOCHAT_CRAWL_MAX_ITEMS", "500"))
     # 是否抓二级评论
     include_sub_comments: bool = _env_bool("WHOCHAT_CRAWL_SUB_COMMENTS", True)
-    # 失败重试次数（指数退避）
+    # 失败重试次数（指数退避）。只在"没产出任何新数据"时重试 —— 已有部分
+    # 产出就继续读，重复跑既慢又没必要（落库是幂等的）。
     max_retries: int = int(os.getenv("WHOCHAT_CRAWL_RETRIES", "3"))
+
+    # ---- 周期性关键词监控（长期运营）----
+    # 新加入监控的关键词默认多久采一次
+    default_interval_seconds: int = int(os.getenv("WHOCHAT_CRAWL_WATCH_INTERVAL", "1800"))
+    # 单个采集子进程的硬超时（秒）。**必须有**：MediaCrawler 卡在扫码/风控时
+    # 会一直不返回，而 job_crawl 是串行/有界并发的，一个挂死的子进程会把
+    # 整轮采集拖死（max_instances=1 下后续任务全部饿死）。
+    timeout_seconds: int = int(os.getenv("WHOCHAT_CRAWL_TIMEOUT", "1800"))
+    # 同时跑几个采集子进程。默认 1（最稳，等价于历史行为）。100 个关键词要
+    # 更快产出可调到 3~4，但每个任务会拉起一个浏览器，注意内存与风控。
+    concurrency: int = max(1, min(8, int(os.getenv("WHOCHAT_CRAWL_CONCURRENCY", "1"))))
+    # 一轮最多取多少个到期任务，避免积压时一次性把内存/日志撑爆
+    max_due_tasks: int = int(os.getenv("WHOCHAT_CRAWL_MAX_DUE", "200"))
+
+    # ---- 调度器用的采集后端 ----
+    # 为什么必须能配：调度器是无人值守进程，不会像 CLI 那样显式注册后端。
+    # 早期实现的 job_crawl 直接调 resolve_source，而注册表是空的 —— 每个
+    # 任务都报"未注册的采集后端"，长期采集从未真正跑起来。
+    source: str = os.getenv("WHOCHAT_CRAWL_SOURCE", "mediacrawler")
+    login_type: str = os.getenv("WHOCHAT_CRAWL_LOGIN", "qrcode")
+    # 无人值守默认有头：首次必须扫码登录，无头会直接失败
+    headless: bool = _env_bool("WHOCHAT_CRAWL_HEADLESS", False)
+    # 已登录的 cookie（可选）。有它就不必每次弹二维码。
+    cookies: str = os.getenv("WHOCHAT_CRAWL_COOKIES", "")
+
     # MediaCrawler 所在目录
     mediacrawler_dir: Path = VENDOR_DIR / "MediaCrawler"
 

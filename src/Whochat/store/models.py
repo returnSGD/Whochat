@@ -243,7 +243,21 @@ class Alert(Base):
 
 
 class CrawlTask(Base):
-    """采集任务。`last_cursor` 支撑断点续爬 —— 反爬导致中断是常态，必须有。"""
+    """采集任务（一次性 + **周期性关键词监控**）。
+
+    `last_cursor` 支撑断点续爬 —— 反爬导致中断是常态，必须有。
+
+    ⚠️ 周期调度字段是"持续监测"这条需求的核心。早期实现把成功的任务置成
+    `done` 就再也不过问，于是每个关键词**只被采集一次**，"长期监测 100 个
+    关键词"实际上不成立。现在由 `next_run_at` 决定下一次：
+
+        interval_seconds > 0   周期性任务，跑完自动排下一次
+        interval_seconds <= 0  一次性任务，跑完 enabled=False
+        next_run_at is NULL    视为"立即到期"（兼容旧数据 / 新加的词）
+
+    `consecutive_failures` 用于失败退避与运营可见性：采集失败是常态，
+    但不能让一个卡住的词以固定频率无限重试、挤占正常词的采集窗口。
+    """
 
     __tablename__ = "crawl_tasks"
 
@@ -257,7 +271,18 @@ class CrawlTask(Base):
     items_collected: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text)
 
+    # ---- 周期监控 ----
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=1800)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    __table_args__ = (UniqueConstraint("platform", "mode", "target", name="uq_task_target"),)
+    __table_args__ = (
+        UniqueConstraint("platform", "mode", "target", name="uq_task_target"),
+        # 到期查询（enabled + status + next_run_at）走这个联合索引
+        Index("ix_task_due", "enabled", "status", "next_run_at"),
+    )

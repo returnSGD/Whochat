@@ -86,3 +86,77 @@ def test_appended_same_day_file_is_detected(mc, monkeypatch):
 
     ids = {rec["content_id"] for rec in src.crawl(_task())}
     assert ids == {"FIRST", "SECOND"}
+
+
+def test_timeout_is_bounded_and_reads_partial(mc, monkeypatch):
+    """子进程必须带硬超时 —— 否则卡死的 MediaCrawler 会把整轮采集拖死。
+
+    超时不重试：卡住的任务重跑一次大概率还是卡住，代价是又一个 timeout。
+    """
+    src, jsonl_dir = mc
+    import subprocess
+
+    import Whochat.crawler.mediacrawler_source as mod
+
+    timeouts: list[int | None] = []
+
+    def fake_run(cmd, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    assert list(src.crawl(_task())) == []
+    assert timeouts == [src.timeout], "应传入配置的超时且超时后不再重试"
+
+
+def test_retries_only_when_nothing_was_produced(mc, monkeypatch):
+    """零产出（秒退/抖动）才重试；有产出就直接读，不重复跑。"""
+    src, jsonl_dir = mc
+    import Whochat.crawler.mediacrawler_source as mod
+    from Whochat.config import settings
+
+    monkeypatch.setattr(settings.crawl, "max_retries", 3)
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)  # 测试里不等退避
+
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SimpleNamespace(returncode=1)  # 第一次零产出
+        _write(
+            jsonl_dir / "search_contents_2026-09-13.jsonl",
+            {"note_id": "NEW", "title": "第二次才抓到"},
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    ids = {rec["content_id"] for rec in src.crawl(_task())}
+    assert ids == {"NEW"}
+    assert calls["n"] == 2, "第一次零产出后重试一次即可"
+
+
+def test_no_retry_when_output_exists_even_with_nonzero_exit(mc, monkeypatch):
+    """有部分产出时即使退出码非 0 也不重试（落库幂等，重跑只会更慢）。"""
+    src, jsonl_dir = mc
+    import Whochat.crawler.mediacrawler_source as mod
+    from Whochat.config import settings
+
+    monkeypatch.setattr(settings.crawl, "max_retries", 3)
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        calls["n"] += 1
+        _write(
+            jsonl_dir / "search_contents_2026-09-13.jsonl",
+            {"note_id": "PARTIAL", "title": "被风控中断但已有一半"},
+        )
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    ids = {rec["content_id"] for rec in src.crawl(_task())}
+    assert ids == {"PARTIAL"}
+    assert calls["n"] == 1

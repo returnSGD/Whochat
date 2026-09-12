@@ -7,7 +7,7 @@
 
 [在线介绍页](https://whochatting.pages.dev/) · [设计方案](舆情分析Agent_整体方案.md) · [GitHub](https://github.com/returnSGD/Whochat)
 
-`Python 3.10+` · `7 个平台` · `6 层链路` · `308 个测试` · `词典法情感 90.9%`
+`Python 3.10+` · `7 个平台` · `6 层链路` · `324 个测试` · `词典法情感 90.9%`
 
 ---
 
@@ -15,6 +15,7 @@
 
 - [快速开始](#快速开始)
 - [接入真实数据](#接入真实数据)
+- [长期运营与关键词监控](#长期运营与关键词监控)
 - [LLM 分析（可选）](#llm-分析可选)
 - [架构](#架构)
 - [关键模块](#关键模块)
@@ -24,11 +25,7 @@
 - [目录与词典](#目录与词典)
 - [环境说明](#环境说明)
 
-- 介绍链接：https://whochatting.pages.dev/
-
 ---
-
-
 
 ## 快速开始
 
@@ -48,7 +45,7 @@ python -m Whochat.cli dashboard          # → http://localhost:8501
 #   /           看板端 —— 只读：趋势/情感/主题/词云/传播/预警记录（默认页）
 #   /console    操作端 —— 可写：L1~L5 触发与微调（采集/分析/规则/推送）
 
-# 4. 回归测试（308 个用例，约 60 秒）
+# 4. 回归测试（324 个用例，约 50 秒）
 python -m pytest -q
 ```
 
@@ -98,6 +95,71 @@ python -m Whochat.cli status
 ```
 
 支持平台：`douyin` `xhs` `kuaishou` `bilibili` `weibo` `tieba` `zhihu`
+
+---
+
+## 长期运营与关键词监控
+
+调度器**不是**"一次性采集"：每个关键词是一条周期任务，跑完自动按
+`next_run_at` 排下一次，失败按指数退避重试。这才是"长期监测 100 个关键词"
+能成立的原因 —— 早期实现把任务置成 `done` 就再也不过问，每个词只会被采集一次。
+
+### 批量加入监控
+
+```bash
+# 一行一个关键词，支持 # 注释；可同时挂多个平台（每个平台各一套任务）
+python -m Whochat.cli keywords add --platform xhs --platform douyin --file keywords.txt
+python -m Whochat.cli keywords add --platform weibo --keyword "品牌A" --keyword "品牌B"
+
+# 规模与健康度（任务数 / 启用 / 待跑 / 连续失败）
+python -m Whochat.cli keywords status
+python -m Whochat.cli keywords list --platform xhs
+
+# 停用/启用/删除（停用不丢历史与归因）
+python -m Whochat.cli keywords disable --task-id <id>
+python -m Whochat.cli keywords enable  --platform xhs
+python -m Whochat.cli keywords rm --platform xhs --all --yes
+```
+
+操作端 `/console` → **L1 采集 → 关键词监控** 有同样的可视化入口
+（多行文本框 + 平台多选 + 间隔 + 启停/删除）。
+
+### 跑起来
+
+```bash
+python -m Whochat.scheduler.jobs                # 常驻：快通道 1min / 采集+分析 30min / 主题 3:00 / 日报 9:00
+python -m Whochat.scheduler.jobs --once crawl   # 手动跑一轮（也可放进系统计划任务）
+```
+
+每轮只处理**到期**的任务；同一平台串行、跨平台并行。
+
+### 100 个词的吞吐怎么算
+
+单个采集任务会拉起一次浏览器，耗时取决于 `max_items`。粗估：
+
+```
+一轮耗时 ≈ (词数 / 并发) × 单任务耗时      （同平台仍需串行）
+```
+
+默认 `WHOCHAT_CRAWL_CONCURRENCY=1`（最稳）。100 个词、单任务约 2 分钟时，
+串行一轮约 3.3 小时；若把间隔设成 30 分钟就永远追不上，"待跑"会持续累积
+（`keywords status` 会显式告警）。两条路：把间隔调到与吞吐匹配（如 6~12 小时），
+或把并发提到 3~4（每个任务一个浏览器，注意内存与风控）。
+
+### 长期运行要做的事
+
+| 项 | 说明 |
+|---|---|
+| **进程守护** | `scheduler.jobs` 是单进程，崩了不会自愈。用 Windows 任务计划程序 / NSSM / systemd / Docker restart 拉起它 |
+| **文件日志** | 启动自动写 `data/logs/Whochat.log`，10MB × 10 份轮转（此前只打 stdout，进程一关就没） |
+| **超时保护** | 单个采集子进程默认 30 分钟硬超时（`WHOCHAT_CRAWL_TIMEOUT`），卡死会被终止并读取已产出的部分数据 |
+| **崩溃恢复** | 进程中断残留的 running 任务会自动回收重排，不会静默停采 |
+| **SQLite** | 已开 WAL + busy_timeout，采集写与看板读不互相阻塞 |
+| **数据保留** | `python -m Whochat.cli maintenance --prune-snapshots-days 90 --prune-raw-days 180`（默认试运行，`--yes` 才真删） |
+
+> ⚠️ **采集后端由调度器自行注册**。早前 `job_crawl` 直接调 `resolve_source`，
+> 而注册表在无人值守进程里是空的 —— 每个任务都报"未注册的采集后端"，
+> 长期采集其实从未真正跑起来。现在统一走 `crawler.source_for(platform)`。
 
 ---
 
@@ -308,6 +370,7 @@ src/Whochat/
 ├── config.py              配置（代理/采集/模型/情感/预警/存储）
 ├── cli.py                 命令行入口
 ├── console.py             控制台编码兼容（GBK 下 emoji 降级不崩）
+├── logging_setup.py       长期运行日志落盘 + 轮转（stdout Tee 到文件）
 ├── crawler/               L1 采集
 ├── pipeline/              L2 清洗
 ├── analysis/              L3 分析
@@ -321,7 +384,7 @@ src/Whochat/
 dicts/                     停用词 / 敏感词 / 情感词 / jieba 自定义词典
 data/                      SQLite、原始 JSONL、导出物、LLM 字段映射缓存
 vendor/MediaCrawler/       采集基座（git clone，未修改）
-tests/                     pytest 用例（308 个）+ 情感标注集
+tests/                     pytest 用例（324 个）+ 情感标注集
 ```
 
 词典分工（`dicts/`）：

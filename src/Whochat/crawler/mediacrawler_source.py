@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import date
 from pathlib import Path
 from typing import Iterator
@@ -64,6 +65,7 @@ class MediaCrawlerSource:
         cookies: str = "",
         headless: bool = False,
         output_dir: Path | None = None,
+        timeout: int | None = None,
     ):
         self.crawler_dir = Path(crawler_dir or settings.crawl.mediacrawler_dir)
         # 默认用当前解释器；MediaCrawler 依赖多，建议单独建环境后指定
@@ -73,6 +75,9 @@ class MediaCrawlerSource:
         # 登录需要扫码，默认必须有头
         self.headless = headless
         self.output_dir = Path(output_dir or (DATA_DIR / "mc_out"))
+        # 硬超时：没有它，MediaCrawler 卡在扫码/风控上会让子进程永不返回，
+        # 而 job_crawl 是有界并发的 —— 一个挂死的任务会一直占着 worker。
+        self.timeout = int(timeout if timeout is not None else settings.crawl.timeout_seconds)
 
     # ------------------------------------------------------------
 
@@ -154,27 +159,59 @@ class MediaCrawlerSource:
         print(f"[mediacrawler] 工作目录: {self.crawler_dir}")
         print("[mediacrawler] 注意：首次运行需要扫码登录，浏览器会弹出")
 
-        proc = subprocess.run(
-            cmd,
-            cwd=str(self.crawler_dir),
-            env=self.build_env(),
-            # 不用 capture_output：让登录二维码/进度直接打在终端上
-        )
+        # 重试规则：**只在"什么新数据都没产出"时重试**。
+        # 部分产出已经落盘（落库幂等），再跑一遍既慢又可能触发更严的风控；
+        # 而完全没产出（秒退/超时）通常是一次网络抖动或风控误伤，值得重试。
+        attempts = max(1, settings.crawl.max_retries + 1)
+        for attempt in range(1, attempts + 1):
+            returncode, timed_out = self._run_once(cmd)
+
+            # 本次被新建或追加过的文件。没有新写入就说明这次真的没抓到东西 ——
+            # 此时**什么都不产出**，而不是把历史文件重读一遍充数。
+            new_files = {
+                p
+                for p in self._output_files(task.platform)
+                if p not in before or self._stat_key(p) != before[p]
+            }
+            if new_files:
+                yield from self._read_outputs(new_files, task.platform, task.target)
+                return
+
+            # 超时不重试：卡死的任务重跑一次大概率还是卡死，代价是又一个 timeout
+            can_retry = attempt < attempts and not timed_out and returncode != 0
+            if not can_retry:
+                print("[mediacrawler] 本次没有新的输出文件（可能被风控中断或没有新数据）")
+                return
+            wait = min(2 ** attempt, 30)
+            print(
+                f"[mediacrawler] 本次无产出（退出码 {returncode}），"
+                f"{wait}s 后重试 {attempt}/{attempts - 1}"
+            )
+            time.sleep(wait)
+
+    def _run_once(self, cmd: list[str]) -> tuple[int, bool]:
+        """跑一次子进程。返回 (returncode, 是否超时)。
+
+        超时时 subprocess.run 会杀掉子进程再抛 TimeoutExpired —— 已写出的
+        部分数据仍在磁盘上，调用方照常读取，不浪费。
+        """
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(self.crawler_dir),
+                env=self.build_env(),
+                timeout=self.timeout,
+                # 不用 capture_output：让登录二维码/进度直接打在终端上
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"[mediacrawler] 超时（>{self.timeout}s），已终止子进程；"
+                "已写出的部分数据仍会被读取"
+            )
+            return -1, True
         if proc.returncode != 0:
             print(f"[mediacrawler] 退出码 {proc.returncode}（可能被风控中断，已产出的数据仍会被读取）")
-
-        # 本次被新建或追加过的文件。没有新写入就说明这次真的没抓到东西 ——
-        # 此时**什么都不产出**，而不是把历史文件重读一遍充数。
-        new_files = {
-            p
-            for p in self._output_files(task.platform)
-            if p not in before or self._stat_key(p) != before[p]
-        }
-        if not new_files:
-            print("[mediacrawler] 本次没有新的输出文件（可能被风控中断或没有新数据）")
-            return
-
-        yield from self._read_outputs(new_files, task.platform, task.target)
+        return proc.returncode, False
 
     # ------------------------------------------------------------
 

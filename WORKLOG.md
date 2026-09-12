@@ -985,3 +985,79 @@ WHOCHAT_LLM_ENABLED='false'  → is_enabled = False  （显式关）
   placeholder 里只有掩码
 - 地址为空时报错且**不写出**空配置
 - 测试全程隔离：跑完仓库里没有多出 `.env`（已确认）
+
+## 十八、长期稳定运营 + 100 关键词监控（2026-09-13）
+
+经理对齐需求后新增两条刚性要求：**长时间稳定运营**、**至少监测 100 个关键词**。
+盘下来两条都只有骨架，机制上不成立，本轮补齐。
+
+### 18.1 两个致命缺陷（不是"不够好"，是"没跑起来"）
+
+**A. 周期任务跑完就消失。** `job_crawl` 成功后把 `status` 置 `done`
+（旧 `jobs.py:107`），而查询只取 `pending/running`（旧 `:85`），全代码没有
+任何地方把 `done` 改回 `pending`，表上也没有周期字段。结果：**每个关键词只被
+采集一次**，"持续监测"直接不成立。
+
+**B. 调度器的采集后端注册表是空的。** 各采集后端只在 CLI 显式调用
+`register_mediacrawler()` / `register_mock()` 时才注册（`crawler/*.py` 末尾的
+工厂函数），而 `job_crawl` 直接 `resolve_source(platform)` 查进程内注册表 ——
+无人值守进程里这张表**永远是空的**，每个任务都命中
+`KeyError: 未注册的采集后端`。也就是说，即便 A 修好了，长期采集依然每轮失败，
+且只表现为日志里一行报错。修法：新增 `crawler/__init__.py::source_for(platform)`，
+按 `WHOCHAT_CRAWL_SOURCE` 构建并注册后端，调度器统一走它。
+
+### 18.2 周期调度：从"一次性"到"滚动重排"
+
+`CrawlTask` 加 `enabled / interval_seconds / last_run_at / next_run_at /
+consecutive_failures`（老库由 `_ensure_columns` 增量 ALTER 加列，幂等）。
+`mark_task_result` 是落点：成功 → `next_run_at = now + interval`；失败 →
+**不退场**，按连续失败次数退避（×2/×4/×8，封顶 6h）后再排；`interval<=0`
+为一次性，跑完 `enabled=False`。`next_run_at IS NULL` 视为立即到期，兼容旧数据。
+
+崩溃恢复：进程被 kill 时任务停在 `running`，而到期查询会跳过 running ——
+不回收就是**永久静默停采**。`reset_stale_running` 用 `updated_at` 判断超时
+（阈值 `max(timeout*2, 1h)`）并打回 pending。
+
+### 18.3 100 个关键词的入口与吞吐
+
+- **批量入口**：`cli keywords add/list/status/enable/disable/rm`，支持
+  `--file`（一行一个、`#` 注释、utf-8-sig 吃 BOM）、多个 `--platform`；
+  操作端 L1 加了多行文本框 + 平台多选 + 间隔 + 启停/删除面板。按
+  `(platform, mode, target)` 唯一约束幂等，重复导入不建重复任务。
+- **并发**：`ThreadPoolExecutor` + `WHOCHAT_CRAWL_CONCURRENCY`（默认 1）。
+  关键约束：**同平台串行、跨平台并行**。同平台并发有两个真实风险 ——
+  MediaCrawler 按天复用同一 JSONL 文件名，mtime 判"本次新增"会把 A 关键词的
+  记录误归到 B；同账号多浏览器会话更容易触发风控。
+- **吞吐告警**：`keywords status` 与每轮 job 日志都会显示"待跑"数；待跑长期 >0
+  说明监测频率跟不上，提示调间隔或并发。
+
+### 18.4 稳定运营加固
+
+| 项 | 做法 |
+|---|---|
+| 子进程硬超时 | `_run_once` 传 `timeout`；超时杀掉并读取已产出的部分数据。**超时不重试**（重跑大概率还卡），只在"零产出"时按 `max_retries` 退避重试 |
+| 限速真正生效 | 旧 `min_interval` / `max_retries` 只定义、只显示，采集路径从未使用；现在 `min_interval` 用于任务启动间隔，`max_retries` 用于零产出重试 |
+| 文件日志 | 新增 `logging_setup.py`：RotatingFileHandler（10MB×10）+ 把 stdout/stderr Tee 进 `data/logs/Whochat.log`。此前只 print，进程一关全没 |
+| SQLite | WAL + `synchronous=NORMAL` + `busy_timeout=30000`，采集写与看板读不互相阻塞 |
+| 数据保留 | `cli maintenance --prune-snapshots-days / --prune-raw-days`，**默认试运行**，`--yes` 才真删 |
+| 进程守护 | 代码层不解决，README 明确要求用任务计划/NSSM/systemd/Docker 拉起 |
+
+### 18.5 验证
+
+- `pytest -q` **324 passed / 2 xfailed**（308 → 324，新增 16 条）
+- 新增 `tests/test_watch_tasks.py` 钉死：批量幂等、到期重排、失败退避、
+  一次性任务收口、崩溃回收、`job_crawl` 端到端重排、老库增量迁移幂等
+- `test_mediacrawler_source.py` 新增：超时被传入且不重试、零产出才重试、
+  有部分产出即使退出码非 0 也不重试
+- CLI 端到端实测（临时库 + mock 后端）：`keywords add` 6 任务 →
+  `scheduler --once crawl` 执行 → `status done` + `next_run_at` 已排下一轮；
+  禁用后 `due=0`；`rm` 无 `--yes` 被拦、有 `--yes` 删除成功
+
+### 18.6 诚实限制
+
+- 并发默认 1，100 个词按吞吐估算需要把间隔调到 6~12 小时或把并发提到 3~4；
+  文档给了算式，但没有自动调参。
+- 失败退避上限 6 小时且**不会自动停用**长期失败的关键词（有意为之：静默停采
+  比报错更危险），是否要自动停用需要业务确认。
+- 真实 MediaCrawler 的扫码/风控行为未在本轮实测（vendor 未安装），
+  超时/重试只在测试桩上验证了契约。

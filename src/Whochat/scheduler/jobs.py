@@ -63,59 +63,158 @@ def job_fast_alert() -> None:
         repo.close()
 
 
-def job_crawl() -> None:
-    """采集 —— 默认每 30 分钟。
+def _crawl_one(
+    task_id: str,
+    platform: str,
+    mode: str,
+    target: str,
+    lock=None,
+) -> tuple[str, bool, str, int]:
+    """在独立线程/独立会话里跑一个采集任务。
 
-    采集失败是**常态**（403/滑块/登录态失效），所以这里不抛异常，
-    只记录，让下一次周期继续跑。断点续爬游标存在 CrawlTask.last_cursor。
+    每个任务开自己的 Repository（= 自己的连接）。SQLite 已开 WAL +
+    busy_timeout，多写者会排队而不是直接报 "database is locked"。
+
+    `lock` 是**平台级互斥锁**：同一平台的多个关键词必须串行。原因有两个，
+    都不是理论风险：
+      1. MediaCrawler 按天复用同一个 JSONL 文件名（search_contents_DATE），
+         同平台并发写同一个文件后，适配器按 mtime 判"本次新增"会把 A 关键词
+         的记录误当成 B 关键词的产出（归因错乱）；
+      2. 同一平台/账号并发多个浏览器会话，更容易触发风控。
+    跨平台仍然并行 —— 那才是并发的价值所在。
     """
-    from Whochat.crawler.base import CrawlTask, resolve_source
+    from contextlib import nullcontext
+
+    from Whochat.crawler import source_for
+    from Whochat.crawler.base import CrawlTask
     from Whochat.pipeline.runner import Pipeline
+    from Whochat.store.repository import Repository
+
+    repo = Repository()
+    try:
+        # ⚠️ 必须经 source_for 构建并注册后端：调度器进程里注册表默认是空的，
+        # 直接 resolve_source 会命中 KeyError，任务永远失败。
+        source = source_for(platform)
+        task = CrawlTask(
+            platform=platform,
+            mode=mode,
+            target=target,
+            max_items=settings.crawl.max_items,
+            include_sub_comments=settings.crawl.include_sub_comments,
+        )
+        with (lock if lock is not None else nullcontext()):
+            stats = Pipeline(repo).crawl(task, source_name=source.name)
+        _log(
+            f"  ✓ {platform}/{target}"
+            f" — 内容 {stats.stored_contents} / 评论 {stats.stored_comments}"
+        )
+        return task_id, True, "", stats.stored_comments
+    except Exception as e:
+        # 单个任务失败不能影响其他任务，也不能中断调度器
+        msg = f"{type(e).__name__}: {e}"
+        _log(f"  ✗ {platform}/{target} — {msg}")
+        return task_id, False, msg, 0
+    finally:
+        repo.close()
+
+
+def job_crawl() -> None:
+    """采集 —— 默认每 30 分钟扫一次**到期**的监控任务。
+
+    采集失败是**常态**（403/滑块/登录态失效），所以这里不抛异常，只记录，
+    让任务失败退避后继续排期。断点续爬游标存在 CrawlTask.last_cursor。
+
+    ⚠️ 与早期实现的关键区别：任务不再是"跑完 done 就再也不管"。每个任务的
+    `next_run_at` 决定下一次何时到期，`mark_task_result` 在每轮结束后重新排期
+    —— 这才是"长期监测 100 个关键词"能成立的原因。
+
+    并发：每个任务会拉起一个浏览器子进程，默认 `concurrency=1`（最稳）。
+    100 个词要更快产出可调高，但注意内存与平台风控。
+    """
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from Whochat.store.repository import Repository
 
     _log("采集")
     repo = Repository()
     try:
-        from sqlalchemy import select
+        # 崩溃残留的 running 若不回收，会被到期查询永久跳过，该关键词静默停采
+        stale_after = max(settings.crawl.timeout_seconds * 2, 3600)
+        recovered = repo.reset_stale_running(stale_after)
+        if recovered:
+            _log(f"  回收 {recovered} 个中断残留的 running 任务")
 
-        from Whochat.store.models import CrawlTask as CrawlTaskModel
-
-        rows = list(
-            repo.session.scalars(
-                select(CrawlTaskModel).where(CrawlTaskModel.status.in_(("pending", "running")))
-            )
-        )
-        if not rows:
-            _log("  没有待执行的采集任务")
+        summary = repo.watch_summary()
+        if summary["enabled"] == 0:
+            _log("  没有启用的监控任务（用 `cli keywords add` 添加）")
             return
 
-        pipeline = Pipeline(repo)
-        for row in rows:
-            _log(f"  {row.platform}/{row.target}")
-            row.status = "running"
-            repo.session.commit()
-            try:
-                source = resolve_source(row.platform)
-                task = CrawlTask(
-                    platform=row.platform,
-                    mode=row.mode,
-                    target=row.target,
-                    max_items=settings.crawl.max_items,
-                    include_sub_comments=settings.crawl.include_sub_comments,
+        rows = repo.due_crawl_tasks(limit=settings.crawl.max_due_tasks)
+        if not rows:
+            _log(
+                f"  没有到期任务（监控 {summary['enabled']} 个，"
+                f"运行中 {summary['running']}）"
+            )
+            return
+
+        jobs = [(r.task_id, r.platform, r.mode, r.target) for r in rows]
+        workers = max(1, min(settings.crawl.concurrency, len(jobs)))
+        _log(
+            f"  到期 {len(jobs)} 个任务，并发 {workers}"
+            + (f"，历史失败 {summary['failing']} 个" if summary["failing"] else "")
+        )
+        repo.mark_task_running([j[0] for j in jobs])
+
+        # 平台级互斥锁：同平台串行（见 _crawl_one 的说明），跨平台并行
+        import threading
+
+        locks: dict[str, threading.Lock] = {}
+        locks_guard = threading.Lock()
+
+        def platform_lock(platform: str) -> threading.Lock:
+            with locks_guard:
+                return locks.setdefault(platform, threading.Lock())
+
+        succeeded = failed = 0
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="crawl") as ex:
+            futures = []
+            for i, (tid, platform, mode, target) in enumerate(jobs):
+                # 任务**启动**之间限速。低于 3 秒会显著提高被封概率（config）。
+                if i and settings.crawl.min_interval > 0:
+                    time.sleep(settings.crawl.min_interval)
+                _log(f"  → {platform}/{target}")
+                futures.append(
+                    ex.submit(_crawl_one, tid, platform, mode, target, platform_lock(platform))
                 )
-                stats = pipeline.crawl(task, source_name=source.name)
-                row.status = "done"
-                row.items_collected = (row.items_collected or 0) + stats.stored_comments
-                _log(f"    内容 {stats.stored_contents} / 评论 {stats.stored_comments}")
-            except Exception as e:
-                # 单个任务失败不能影响其他任务
-                row.status = "pending"  # 保持 pending，下轮重试
-                row.error = f"{type(e).__name__}: {e}"[:500]
-                _log(f"    失败: {row.error}")
-            repo.session.commit()
+
+            for fut in as_completed(futures):
+                try:
+                    tid, ok, err, items = fut.result()
+                except Exception as e:  # 理论上 _crawl_one 不抛，兜底
+                    _log(f"  任务异常: {type(e).__name__}: {e}")
+                    continue
+                repo.mark_task_result(tid, ok=ok, items=items, error=err or None)
+                if ok:
+                    succeeded += 1
+                else:
+                    failed += 1
+
+        after = repo.watch_summary()
+        _log(
+            f"  完成 {succeeded} / 失败 {failed}；"
+            f"仍在监控 {after['enabled']} 个，待跑 {after['due']} 个"
+        )
+        if after["due"] > 0:
+            _log(
+                "  ⚠️ 仍有到期任务未处理：提高 WHOCHAT_CRAWL_CONCURRENCY "
+                "或调大各关键词的采集间隔，否则监测频率会持续走低"
+            )
     except Exception as e:
         _log(f"  失败: {type(e).__name__}: {e}")
     finally:
+        # 必须放 finally：异常路径上不关会话会一直占着池化连接，
+        # 每 30 分钟一次的 job 很快就把连接池耗光。
         repo.close()
 
 
@@ -264,6 +363,10 @@ def build_scheduler():
 def main(argv: list[str] | None = None) -> int:
     # 日报（dry-run 分支）会打印带 emoji 的文案，GBK 控制台必须先降级
     configure_console()
+    # 长期运行必须落文件日志 —— stdout 一关就没了，出了事无从回溯
+    from Whochat.logging_setup import setup_logging
+
+    log_path = setup_logging()
     parser = argparse.ArgumentParser(
         prog="Whochat.scheduler",
         description="舆情分析调度器 —— 快通道 / 采集 / 分析 / 主题 / 日报",
@@ -299,9 +402,31 @@ def main(argv: list[str] | None = None) -> int:
         # Windows 任务计划程序/服务停止走的是 SIGTERM
         signal.signal(signal.SIGTERM, _handle_signal(scheduler))
 
-    _log("调度器启动")
+    _log(f"调度器启动（日志: {log_path}）")
     for job in scheduler.get_jobs():
         _log(f"  {job.id:<14} {job.trigger}")
+
+    # 把监控规模打在启动日志里：长期运营第一眼要看到"我在盯多少词、健康吗"
+    try:
+        from Whochat.store.repository import Repository, init_db
+
+        init_db()
+        repo = Repository()
+        try:
+            s = repo.watch_summary()
+            _log(
+                f"  监控任务: 共 {s['total']} / 启用 {s['enabled']} / "
+                f"待跑 {s['due']} / 连续失败 {s['failing']}"
+            )
+            if s["enabled"] > 0:
+                _log(
+                    f"  采集并发 {settings.crawl.concurrency}"
+                    f"（每任务超时 {settings.crawl.timeout_seconds}s）"
+                )
+        finally:
+            repo.close()
+    except Exception as e:
+        _log(f"  读取监控规模失败: {type(e).__name__}: {e}")
     _log("Ctrl+C 停止")
 
     try:
