@@ -181,37 +181,49 @@ def propagation_metrics(comments: Sequence, contents: dict, top_n: int = 10) -> 
             ),
         }
 
-    # KOL 识别：按粉丝数排序的头部账号
-    ranked = sorted(
-        contents.values(),
-        key=lambda c: getattr(c, "author_follower_count", 0) or 0,
-        reverse=True,
-    )[:top_n]
+    # KOL 识别：按粉丝数排序的头部账号。
+    # ⚠️ 没有粉丝数就**不要**输出这个榜 —— 否则排序键全是 0/None，
+    #    会列出一个"看起来有模有样"但其实毫无意义的 TOP 榜，
+    #    比诚实地说"缺这个字段"更糟。
+    kols = []
+    if has_followers:
+        ranked = sorted(
+            contents.values(),
+            key=lambda c: getattr(c, "author_follower_count", 0) or 0,
+            reverse=True,
+        )[:top_n]
+        kols = [
+            {
+                "content_id": c.content_id,
+                "author_name": getattr(c, "author_name", None),
+                "followers": getattr(c, "author_follower_count", 0),
+                "like_count": getattr(c, "like_count", 0),
+                "platform": getattr(c, "platform", None),
+            }
+            for c in ranked
+        ]
 
-    kols = [
-        {
-            "content_id": c.content_id,
-            "author_name": getattr(c, "author_name", None),
-            "followers": getattr(c, "author_follower_count", 0),
-            "like_count": getattr(c, "like_count", 0),
-            "platform": getattr(c, "platform", None),
-        }
-        for c in ranked
-    ]
-
-    # 传播路径：parent → child 的边
+    # 传播路径：parent → child 的边（没有 parent_content_id 时自然为空）
     edges = [
         {"from": c.parent_content_id, "to": c.content_id}
         for c in contents.values()
         if getattr(c, "parent_content_id", None)
     ]
 
+    missing = []
+    if not has_parent:
+        missing.append("parent_content_id（传播路径不可用）")
+    if not has_followers:
+        missing.append("author_follower_count（KOL 识别不可用）")
+
     return {
         "available": True,
         "kol_count": len(kols),
         "kols": kols,
+        "kol_available": bool(has_followers),
         "edge_count": len(edges),
         "edges": edges[:200],
         "has_parent_ratio": round(has_parent / len(contents), 3),
         "has_follower_ratio": round(has_followers / len(contents), 3),
+        "missing": missing,
     }

@@ -204,6 +204,12 @@ class MockSource:
         n_burst_contents = max(2, int(n_contents * burst_share))
         platforms = [task.platform] if task.platform != "mock" else _PLATFORMS
 
+        # 传播链：记录已生成内容的发布时间，后面部分内容可以"转发"更早的内容。
+        # 之前 mock 把 parent_content_id 恒置 None，导致传播路径这条链路
+        # 在 demo 里从来没被跑过 —— 看板做出来也没有数据可验证。
+        all_cids: list[str] = []
+        content_publish: dict = {}
+
         for i in range(n_contents):
             platform = rng.choice(platforms)
             cid = f"{platform}_c{i:04d}"
@@ -224,6 +230,14 @@ class MockSource:
             # 越靠近爆发点，内容热度越高（点赞/转发量随距爆发点的距离衰减）
             heat = max(1.0, 10.0 - abs(hours_ago - burst_hours_ago) / 3.0)
 
+            # 约 1/3 的内容引用更早发布的内容（转发/引用）。只能引用已生成且
+            # 发布时间更早的，保证 parent → child 方向正确、且没有悬空父引用。
+            parent_cid = None
+            if i >= 5 and i % 3 == 1:
+                candidates = [c for c in all_cids if content_publish[c] < publish]
+                if candidates:
+                    parent_cid = candidates[-1]
+
             result.contents.append(
                 content_record(
                     content_id=cid,
@@ -241,10 +255,12 @@ class MockSource:
                     like_count=int(rng.randint(10, 5000) * heat),
                     comment_count=int(rng.randint(5, 800) * heat),
                     share_count=int(rng.randint(0, 300) * heat),
-                    parent_content_id=None,
+                    parent_content_id=parent_cid,
                     raw_json={"mock": True, "seed": seed},
                 )
             )
+            all_cids.append(cid)
+            content_publish[cid] = publish
 
             # 爆发内容配的评论多得多 —— 这才是"爆发"该有的样子
             n_comments = rng.randint(40, 100) if is_burst else rng.randint(4, 15)

@@ -39,6 +39,20 @@ class TestParseCount:
     def test_missing_values_become_none(self, raw):
         assert parse_count(raw) is None
 
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("约1.2万", 12_000),
+            ("超过3万", 30_000),
+            # 畸形值必须返回 None，而不是静默截出错误数字
+            ("1.2.3", None),
+            ("1e3", None),
+            ("1.2万3", None),
+        ],
+    )
+    def test_malformed_values_are_not_misparsed(self, raw, expected):
+        assert parse_count(raw) == expected
+
 
 class TestParseBool:
     @pytest.mark.parametrize("raw", ["1", "true", "True", "yes", "y", "是", "v", "verified", 1, True])
@@ -115,3 +129,80 @@ class TestNormalizeComment:
         """字段名变了也要能命中别的候选，这是别名表存在的意义。"""
         rec = normalize_comment({"rpid": "r1", "text": "换平台字段名了", "note_id": "N1"}, "bilibili")
         assert rec["comment_id"] == "r1"
+
+    def test_bilibili_top_level_parent_zero_is_not_a_parent(self):
+        """回归：bilibili 顶层评论固定写 parent_comment_id="0"，
+        之前被判为有父评论 → 全部一级评论误标 level=2 并挂到不存在的父 "0"。"""
+        rec = normalize_comment(
+            {"comment_id": "c1", "content": "内容", "video_id": "BV1", "parent_comment_id": "0"},
+            "bilibili",
+        )
+        assert rec["level"] == 1
+        assert rec["parent_comment_id"] is None
+
+
+class TestMediaCrawlerRealFields:
+    """MediaCrawler 各平台输出的真实字段名 —— 别名表必须覆盖，
+    否则真实采集的作者/指标字段会静默为 NULL。"""
+
+    def test_content_creator_hash_and_nickname(self):
+        rec = normalize_content(
+            {"note_id": "N1", "creator_hash": "HASH1", "nickname": "某人", "desc": "正文"}, "xhs"
+        )
+        assert rec["author_name"] == "某人"
+        assert rec["author_id"] is not None
+        assert rec["author_id"] != "HASH1", "平台哈希也要再脱敏一次，保持全库口径一致"
+
+    def test_zhihu_content_fields(self):
+        rec = normalize_content(
+            {
+                "content_id": "A1",
+                "content_type": "answer",
+                "content_text": "知乎正文",
+                "created_time": 1700000000,
+                "creator_hash": "H",
+                "user_nickname": "知友",
+                "content_url": "https://www.zhihu.com/x",
+                "voteup_count": 5,
+            },
+            "zhihu",
+        )
+        assert rec["body_text"] == "知乎正文"
+        assert rec["publish_time"] is not None
+        assert rec["author_name"] == "知友"
+        assert rec["content_type"] == "answer"
+        assert rec["url"] == "https://www.zhihu.com/x"
+
+    def test_bilibili_metric_fields(self):
+        rec = normalize_content(
+            {
+                "video_id": "BV1",
+                "title": "标题",
+                "video_comment": "12",
+                "video_share_count": "3",
+                "video_favorite_count": "4",
+                "video_type": "video",
+                "creator_hash": "H",
+                "nickname": "UP主",
+            },
+            "bilibili",
+        )
+        assert rec["comment_count"] == 12
+        assert rec["share_count"] == 3
+        assert rec["collect_count"] == 4
+        assert rec["content_type"] == "video"
+
+    def test_weibo_comment_fields(self):
+        rec = normalize_comment(
+            {
+                "comment_id": "c1",
+                "content": "内容",
+                "note_id": "N1",
+                "comment_like_count": "7",
+                "creator_hash": "H",
+                "user_nickname": "甲",
+            },
+            "weibo",
+        )
+        assert rec["like_count"] == 7
+        assert rec["author_id"] is not None

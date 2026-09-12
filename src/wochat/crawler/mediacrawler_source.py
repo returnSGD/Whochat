@@ -140,7 +140,14 @@ class MediaCrawlerSource:
         # 只统计当前任务的平台目录：MediaCrawler 输出目录是所有平台共用的，
         # 若不按平台过滤，上一轮别的平台残留的文件会被误判为本次产出，
         # 进而被 _read_outputs 贴上当前平台的标签（跨平台数据污染）。
-        before = set(self._output_files(task.platform))
+        #
+        # 记录 mtime 而不是只记录文件名：MediaCrawler 按天复用同一个文件名，
+        # 同一天第二次跑会**追加**到已存在的文件里，文件名的集合不会变。
+        # 之前的"没见过新文件名就回退读本平台全部输出"因此会在每次运行时
+        # 把**所有历史文件**重读一遍 —— 旧内容的 search_keyword 被当前关键词
+        # 改写、快照表被整段历史灌水。按 mtime 判断"这次有没有被写过"才能
+        # 精确地只读本次新增。
+        before = {p: self._stat_key(p) for p in self._output_files(task.platform)}
         cmd = self.build_command(task)
 
         print(f"[mediacrawler] 执行: {' '.join(cmd)}")
@@ -156,15 +163,34 @@ class MediaCrawlerSource:
         if proc.returncode != 0:
             print(f"[mediacrawler] 退出码 {proc.returncode}（可能被风控中断，已产出的数据仍会被读取）")
 
-        new_files = set(self._output_files(task.platform)) - before
+        # 本次被新建或追加过的文件。没有新写入就说明这次真的没抓到东西 ——
+        # 此时**什么都不产出**，而不是把历史文件重读一遍充数。
+        new_files = {
+            p
+            for p in self._output_files(task.platform)
+            if p not in before or self._stat_key(p) != before[p]
+        }
         if not new_files:
-            # 日期跨天等情况，退化为读取本平台今天的全部文件
-            new_files = set(self._output_files(task.platform))
-            print("[mediacrawler] 未发现新文件，回退读取本平台全部输出文件")
+            print("[mediacrawler] 本次没有新的输出文件（可能被风控中断或没有新数据）")
+            return
 
         yield from self._read_outputs(new_files, task.platform, task.target)
 
     # ------------------------------------------------------------
+
+    @staticmethod
+    def _stat_key(path: Path) -> tuple[float, int]:
+        """(mtime, size)。
+
+        只看 mtime 不够：文件系统时间戳粒度可能让"刚追加的内容"与采集前
+        的时间戳相同，从而被漏判为没变化。size 一起比可以兜住纯追加的场景
+        —— 而追加正是 MediaCrawler 同一天复用文件名时的写入方式。
+        """
+        try:
+            st = path.stat()
+            return (st.st_mtime, st.st_size)
+        except OSError:
+            return (0.0, 0)
 
     def _output_files(self, platform: str) -> list[Path]:
         """只返回指定平台的输出文件（MediaCrawler 各平台输出目录互不干扰）。"""

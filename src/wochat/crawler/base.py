@@ -154,6 +154,11 @@ def comment_record(
     """
     from wochat.store.models import utcnow
 
+    # 和 content_record 一样防御性丢弃：调用方若传了 author_id=，
+    # 会在下面的 **kwargs 展开里覆盖刚脱敏的值，原始 ID 就落库了。
+    kwargs.pop("author_id", None)
+    kwargs.pop("author_name_raw", None)
+
     return {
         "comment_id": str(comment_id),
         "content_id": str(content_id),

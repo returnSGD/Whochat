@@ -30,6 +30,20 @@ class TestExactDedupe:
         assert text_fingerprint(None) == text_fingerprint("")
 
 
+class TestEmojiPolarityPreserved:
+    """emoji 是中文社媒的主要极性信号，不能因为正文相同就被判成重复。"""
+
+    def test_opposite_emoji_are_not_exact_duplicates(self):
+        a = "这个产品真的很好用😀"
+        b = "这个产品真的很好用😡"
+        assert exact_dedupe([a, b]) == [a, b]
+        assert text_fingerprint(a) != text_fingerprint(b)
+
+    def test_punctuation_insensitivity_still_holds(self):
+        """保留 emoji 不等于放弃标点归一 —— 这两件事要同时成立。"""
+        assert exact_dedupe(["这个真好用！！", "这个真好用"]) == ["这个真好用！！"]
+
+
 class TestMinHashDedupe:
     """短文本回归：3-gram 对 ≤2 字的文本产生 0 个 shingle，
     MinHash 全空 → 所有短评论互相判为近重复，只留第一条。

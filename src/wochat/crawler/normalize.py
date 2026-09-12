@@ -19,29 +19,37 @@ from wochat.crawler.base import anonymize_id, clean_text_basic, content_record, 
 CONTENT_ALIASES: dict[str, list[str]] = {
     "content_id": ["note_id", "aweme_id", "video_id", "content_id", "article_id", "tid", "id", "mid"],
     "title": ["title", "note_title", "aweme_title", "video_title"],
-    "body_text": ["desc", "content", "text", "body", "description", "abstract"],
+    # content_text / video_content 是 zhihu / bilibili 的真实正文字段名
+    "body_text": ["desc", "content", "text", "body", "description", "abstract", "content_text", "video_content"],
     "url": ["note_url", "aweme_url", "video_url", "content_url", "url", "share_url"],
-    "publish_time": ["create_time", "time", "publish_time", "created_at", "pub_time", "date"],
-    "author_id": ["user_id", "author_id", "uid", "sec_uid", "creator_id"],
-    "author_name": ["nickname", "author_name", "user_name", "screen_name", "name", "uname"],
+    # created_time 是 zhihu 的发布时间字段
+    "publish_time": ["create_time", "time", "publish_time", "created_at", "pub_time", "date", "created_time"],
+    # creator_hash 是 MediaCrawler 所有平台输出的作者字段（平台侧已匿名哈希）。
+    # 少了它，真实采集的 author_id 恒为 NULL —— KOL 识别/作者聚合全部失效。
+    "author_id": ["user_id", "author_id", "uid", "sec_uid", "creator_id", "creator_hash"],
+    # user_nickname 是 zhihu / tieba 的昵称字段
+    "author_name": ["nickname", "author_name", "user_name", "screen_name", "name", "uname", "user_nickname"],
     "author_follower_count": ["follower_count", "fans", "followers", "fans_count"],
     "author_verified": ["is_verified", "verified", "official_verify"],
     "like_count": ["liked_count", "like_count", "digg_count", "likes", "voteup_count"],
-    "comment_count": ["comment_count", "comments_count", "reply_count", "answer_count"],
-    "share_count": ["share_count", "shared_count", "repost_count", "forward_count"],
-    "collect_count": ["collected_count", "collect_count", "fav_count", "favorite_count"],
+    # video_comment 是 bilibili 的评论数
+    "comment_count": ["comment_count", "comments_count", "reply_count", "answer_count", "video_comment"],
+    "share_count": ["share_count", "shared_count", "repost_count", "forward_count", "video_share_count"],
+    "collect_count": ["collected_count", "collect_count", "fav_count", "favorite_count", "video_favorite_count"],
     "parent_content_id": ["parent_content_id", "retweet_id", "repost_id", "forward_id", "origin_id"],
-    "content_type": ["type", "content_type", "note_type", "media_type"],
+    # aweme_type / video_type 是 douyin / kuaishou 的内容类型
+    "content_type": ["type", "content_type", "note_type", "media_type", "aweme_type", "video_type"],
 }
 
 COMMENT_ALIASES: dict[str, list[str]] = {
     "comment_id": ["comment_id", "cid", "id", "rpid", "tid"],
     "text": ["content", "text", "comment", "body", "message"],
     "publish_time": ["create_time", "time", "publish_time", "created_at", "ctime"],
-    "author_id": ["user_id", "author_id", "uid", "mid"],
-    "author_name": ["nickname", "user_name", "author_name", "uname"],
+    "author_id": ["user_id", "author_id", "uid", "mid", "creator_hash"],
+    "author_name": ["nickname", "user_name", "author_name", "uname", "user_nickname"],
     "author_follower_count": ["follower_count", "fans", "followers"],
-    "like_count": ["like_count", "liked_count", "digg_count", "vote", "like"],
+    # comment_like_count 是 weibo 的评论点赞数
+    "like_count": ["like_count", "liked_count", "digg_count", "vote", "like", "comment_like_count"],
     "reply_count": ["sub_comment_count", "reply_count", "sub_comment_num", "replies"],
     "parent_comment_id": ["parent_comment_id", "parent_id", "root_comment_id", "pid"],
     "reply_to_comment_id": ["reply_to_comment_id", "reply_id", "to_comment_id"],
@@ -83,7 +91,11 @@ def parse_count(value: Any) -> int | None:
     if not s or s in ("暂无", "无", "-", "--", "null", "None"):
         return None
 
-    m = re.match(r"^(\d+(?:\.\d+)?)\s*([万亿wWkK]?)", s)
+    # 容忍"约/近/超/多于"这类修饰前缀，但**必须整串都是合法的计数**。
+    # 之前用非锚定的 re.match，会把 "1.2.3" 解析成 1、"1e3" 解析成 1
+    # （丢掉 'e' 后面的内容），静默产生错误数字 —— 比返回 None 危险得多。
+    s = re.sub(r"^[约近超过大于等于多]+", "", s)
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([万亿wWkK]?)", s)
     if not m:
         return None
     num = float(m.group(1))
@@ -188,6 +200,10 @@ def normalize_comment(raw: dict, platform: str, content_id: str | None = None) -
         return None
 
     parent_comment = pick(raw, COMMENT_ALIASES["parent_comment_id"])
+    # bilibili 的顶层评论固定写 parent_comment_id="0"（字符串），
+    # pick 认为非空 → 一级评论被全量误标成 level=2 并挂到不存在的父 "0"。
+    if parent_comment is not None and str(parent_comment).strip() in ("", "0"):
+        parent_comment = None
     level = 2 if parent_comment else 1
 
     return comment_record(

@@ -23,6 +23,7 @@ import sys
 from datetime import datetime, timedelta
 
 from wochat.config import settings
+from wochat.console import configure_console
 
 # ============================================================ 任务
 
@@ -44,10 +45,16 @@ def job_fast_alert() -> None:
         alert_ids = engine.run_and_record()
         if alert_ids:
             _log(f"  触发 {len(alert_ids)} 条告警")
-            notifier = WeComNotifier(repo=repo)
-            # 实时通道：只有 red 级立刻推，其余留待日报
-            result = notifier.flush()
-            _log(f"  推送: {result.status} — {result.message}")
+
+        # ⚠️ flush 必须**无条件**跑，不能包在 `if alert_ids:` 里。
+        #    发送失败的告警会保持 pending 等下一次重试（notifier.flush 的设计），
+        #    但如果本轮没有新告警就不 flush，那些 pending 根本等不到重试 ——
+        #    直到 6 小时后被 expire_stale_alerts 标记 failed，永久丢警。
+        #    企微限流（45009）或一次网络抖动就足以触发这条路径。
+        notifier = WeComNotifier(repo=repo)
+        # 实时通道：只有 red 级立刻推，其余留待日报
+        result = notifier.flush()
+        _log(f"  推送: {result.status} — {result.message}")
     except Exception as e:
         _log(f"  失败: {type(e).__name__}: {e}")
     finally:
@@ -255,6 +262,8 @@ def build_scheduler():
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 日报（dry-run 分支）会打印带 emoji 的文案，GBK 控制台必须先降级
+    configure_console()
     parser = argparse.ArgumentParser(
         prog="wochat.scheduler",
         description="舆情分析调度器 —— 快通道 / 采集 / 分析 / 主题 / 日报",

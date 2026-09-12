@@ -113,6 +113,29 @@ class TestReplayWindow:
         assert any(h.rule_id == "neg_surge" for h in hits), [h.rule_id for h in hits]
 
 
+class TestRealtimeWindowUpperBound:
+    def test_future_timestamps_are_not_counted(self, engine, repo):
+        """回归：实时窗口曾经只有下界，没有 <= now 的上界。
+
+        平台时间多为本地时间（+8h），而 parse_time 对无时区字符串按 UTC 解析，
+        于是评论的 publish_time 会"落在未来 8 小时"。没有上界时它们会被计入，
+        冷却期一到就反复误报同一批数据。"""
+        seed_default_rules(repo)
+        repo.upsert_comments(
+            [
+                {
+                    "comment_id": f"f{i}",
+                    "content_id": "c1",
+                    "platform": "xhs",
+                    "text": "垃圾东西，太失望了",
+                    "publish_time": utcnow() + timedelta(hours=8),
+                }
+                for i in range(40)
+            ]
+        )
+        assert engine.evaluate() == [], "未来时间戳不应进入实时窗口"
+
+
 class TestCooldown:
     def test_cooldown_suppresses_second_alert(self, engine, repo):
         seed_default_rules(repo)

@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 from wochat.config import EXPORT_DIR, ROOT, settings
+from wochat.console import configure_console
 
 
 # ---------------------------------------------------------------- 工具
@@ -556,6 +557,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 必须在任何打印之前 —— 否则 dry-run 文案里的 emoji 会在 GBK 控制台上崩
+    configure_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

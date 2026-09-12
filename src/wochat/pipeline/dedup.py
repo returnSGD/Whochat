@@ -23,20 +23,28 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-from wochat.pipeline.rules import clean, tokenize
+from wochat.pipeline.rules import EMOJI_CLASS_BODY, clean, tokenize
 
 # ---------------------------------------------------------------- 精确去重
+
+# 标点/空白不算，但 **emoji 要留** —— 见 normalize_for_hash 的说明
+_RE_NOT_SIGNIFICANT = re.compile(rf"[^\w一-鿿{EMOJI_CLASS_BODY}]")
 
 
 def normalize_for_hash(text: str | None) -> str:
     """生成用于比对指纹的规范化文本。
 
     去掉所有标点和空白 —— 「这个真好用！」和「这个真好用」应当判为同一条。
+
+    ⚠️ emoji 必须保留：clean() 默认会把 emoji 抹成空格，于是
+    "这个产品真的很好用😀" 和 "这个产品真的很好用😡" 会得到同一个 SHA256，
+    后一条被标 duplicate、永不进入情感分析。emoji 在中文社媒里是主要极性
+    信号，抹掉它等于系统性丢失/偏置情感分布。
     """
     if not text:
         return ""
-    t = clean(text)
-    return re.sub(r"[^\w一-鿿]", "", t).lower()
+    t = clean(text, keep_emoji=True)
+    return _RE_NOT_SIGNIFICANT.sub("", t).lower()
 
 
 def text_fingerprint(text: str | None) -> str:
@@ -267,11 +275,19 @@ def dedupe(
     near: bool = True,
     prefer_minhash: bool = True,
     threshold: int = 3,
+    jaccard_threshold: float = 0.8,
 ) -> DedupResult:
     """完整去重流水线：先精确，再近重复。
 
     先精确后近重复的顺序很重要 —— 精确去重极快且能砍掉一大半，
     让后面的近重复检测只需处理剩下的。
+
+    Args:
+        threshold: SimHash 的汉明距离阈值（仅在 datasketch 不可用、
+            回退到 SimHash 时生效）。
+        jaccard_threshold: MinHash 的 Jaccard 相似度阈值。装了 datasketch
+            时走的是这条路，**调近重复松紧要改这个**；之前它没有入口，
+            调用方传 threshold 会被静默忽略（两种阈值量纲不同，不能通用）。
     """
     original = len(items)
     exact_kept = exact_dedupe(items, key)
@@ -281,7 +297,7 @@ def dedupe(
         return DedupResult(kept=exact_kept, dropped=[], duplicate_of={}, exact_dropped=exact_dropped)
 
     if prefer_minhash:
-        result = minhash_dedupe(exact_kept, key)
+        result = minhash_dedupe(exact_kept, key, threshold=jaccard_threshold)
         if result is not None:
             # 把精确去重的计数并进来 —— 否则上层统计会漏掉大头
             return DedupResult(

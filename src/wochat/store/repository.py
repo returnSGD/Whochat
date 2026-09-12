@@ -159,8 +159,18 @@ class Repository:
                 self.session.add(RawContent(**payload))
             else:
                 for k, v in payload.items():
-                    if k != "content_id":
-                        setattr(existing, k, v)
+                    # 不要用 None 覆盖已有值：后续采集某字段缺失（别名没命中、
+                    # 平台没返回）时，None 会把库里原本有效的值清空。最典型的是
+                    # publish_time 被清成 NULL —— 该内容从此掉出所有按时间窗的
+                    # 查询（快通道漏警、趋势图失真），且再也回不来。
+                    if k == "content_id" or v is None:
+                        continue
+                    # 归因（search_keyword）一经确立就不再改写：同一条内容可能被
+                    # 多个监控词命中，后来者覆盖前者会让"这条舆情是被哪个词发现的"
+                    # 永久错乱，历史归因统计随之失真。首次带值时仍会补上。
+                    if k == "search_keyword" and existing.search_keyword and existing.search_keyword != v:
+                        continue
+                    setattr(existing, k, v)
             count += 1
         self.session.commit()
         return count
@@ -180,7 +190,9 @@ class Repository:
                 self.session.add(Comment(**payload))
             else:
                 for k, v in payload.items():
-                    if k != "comment_id":
+                    # 同 upsert_contents：None 不覆盖已有值，否则一次缺字段的
+                    # 重复采集会把 publish_time 清成 NULL，评论静默掉出时间窗。
+                    if k != "comment_id" and v is not None:
                         setattr(existing, k, v)
             count += 1
         self.session.commit()
@@ -225,6 +237,19 @@ class Repository:
             count += 1
         self.session.commit()
         return count
+
+    def latest_analysis_version(self) -> str | None:
+        """最近一次写入的分析版本号。
+
+        日报/周报这类"没带版本号"的调用方必须用它来解析版本 —— 版本号是
+        `{后端}-v1`（默认 `lexicon-v1`），写死 "v1" 会查不到任何结果，
+        日报里情感分布永远是空的。
+        """
+        return self.session.scalar(
+            select(AnalysisResult.analysis_version)
+            .order_by(AnalysisResult.processed_at.desc())
+            .limit(1)
+        )
 
     def save_topics(self, run_id: str, topics: Sequence[dict]) -> int:
         self.session.execute(delete(Topic).where(Topic.run_id == run_id))
@@ -368,7 +393,11 @@ class Repository:
         return sorted(buckets.values(), key=lambda x: x["time"])
 
     def top_negative(
-        self, version: str, limit: int = 20, since: datetime | None = None
+        self,
+        version: str,
+        limit: int = 20,
+        since: datetime | None = None,
+        platform: str | None = None,
     ) -> list[tuple[Comment, AnalysisResult]]:
         stmt = (
             select(Comment, AnalysisResult)
@@ -383,7 +412,66 @@ class Repository:
         stmt = _comment_analysis(stmt)
         if since:
             stmt = stmt.where(Comment.publish_time >= since)
+        if platform:
+            stmt = stmt.where(Comment.platform == platform)
         return [(c, a) for c, a in self.session.execute(stmt)]
+
+    def snapshot_series(self, content_id: str) -> list[dict]:
+        """某条内容的指标时序 —— 传播曲线的原始数据。
+
+        时间升序。只有 >=2 个点才谈得上"传播"，单点只是快照。
+        """
+        rows = self.session.scalars(
+            select(MetricSnapshot)
+            .where(MetricSnapshot.content_id == content_id)
+            .order_by(MetricSnapshot.snapshot_time)
+        )
+        return [
+            {
+                "time": _ensure_aware(r.snapshot_time),
+                "like_count": r.like_count or 0,
+                "comment_count": r.comment_count or 0,
+                "share_count": r.share_count or 0,
+            }
+            for r in rows
+        ]
+
+    def contents_with_snapshots(self, limit: int = 200, min_points: int = 2) -> list[dict]:
+        """有多个快照点的内容 —— 看板里传播曲线的可选对象。
+
+        按最新快照时间倒序（最近还在涨的排前面）。title/platform 取自
+        raw_content，方便用户认出是哪条。
+        """
+        rows = self.session.execute(
+            select(
+                MetricSnapshot.content_id,
+                func.count().label("points"),
+                func.min(MetricSnapshot.snapshot_time),
+                func.max(MetricSnapshot.snapshot_time),
+            )
+            .group_by(MetricSnapshot.content_id)
+            .having(func.count() >= min_points)
+            .order_by(func.max(MetricSnapshot.snapshot_time).desc())
+            .limit(limit)
+        ).all()
+        if not rows:
+            return []
+
+        contents = self.content_map([r[0] for r in rows])
+        out = []
+        for cid, points, first_t, last_t in rows:
+            c = contents.get(cid)
+            out.append(
+                {
+                    "content_id": cid,
+                    "title": (getattr(c, "title", None) or cid) if c else cid,
+                    "platform": (getattr(c, "platform", "") or "") if c else "",
+                    "points": points,
+                    "first_time": _ensure_aware(first_t),
+                    "last_time": _ensure_aware(last_t),
+                }
+            )
+        return out
 
     def platform_distribution(self, version: str) -> dict[str, int]:
         stmt = (
@@ -462,6 +550,18 @@ class Repository:
 
     def enabled_rules(self) -> list[AlertRule]:
         return list(self.session.scalars(select(AlertRule).where(AlertRule.enabled.is_(True))))
+
+    def all_rules(self) -> list[AlertRule]:
+        """含禁用规则 —— 操作端的管理列表要用。"""
+        return list(self.session.scalars(select(AlertRule).order_by(AlertRule.rule_id)))
+
+    def delete_rule(self, rule_id: str) -> bool:
+        rule = self.session.get(AlertRule, rule_id)
+        if rule is None:
+            return False
+        self.session.delete(rule)
+        self.session.commit()
+        return True
 
     # -------------------------------------------------- 预警记录
 

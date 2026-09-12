@@ -19,10 +19,12 @@ python -m wochat.cli init
 # 2. 零依赖跑通全链路（不需要爬虫、不需要模型）
 python -m wochat.cli demo
 
-# 3. 看板
+# 3. 可视化（双入口：看板端 / 操作端）
 python -m wochat.cli dashboard          # → http://localhost:6666
+#   /dashboard  看板端 —— 只读：趋势/情感/主题/词云/传播/预警记录
+#   /console    操作端 —— 可写：L1~L5 触发与微调（采集/分析/规则/推送）
 
-# 4. 回归测试（130 个用例，约 16 秒）
+# 4. 回归测试（183 个用例，约 19 秒）
 python -m pytest -q
 ```
 
@@ -114,7 +116,8 @@ L5 预警   聚合·分级·冷却      L6 看板  FastAPI/Streamlit :6666
 | 本地 LLM | `pipeline/llm_clean.py` | Ollama + Qwen，Ollama 不可用时静默跳过 |
 | 情感分析 | `analysis/sentiment.py` | 词典法(子串扫描+否定+程度+转折) / Transformer 双后端 |
 | 主题建模 | `analysis/topics.py` | BERTopic（中文嵌入模型降级链）+ **零下载离线方案**兜底 |
-| 时序/传播 | `analysis/timeseries.py` | 爆发检测、阶段划分、情感漂移、KOL |
+| 时序 | `analysis/timeseries.py` | 爆发检测、阶段划分、情感漂移、KOL |
+| 传播分析 | `analysis/propagation.py` | **传播曲线**（metric_snapshots → 起爆点/峰值/增速拐点）+ **传播路径**（parent_content_id → 转发链 DOT 图） |
 | 存储 | `store/repository.py` | 统一读写接口，上层不碰 SQL |
 | 预警规则 | `alert/rules_engine.py` | 快通道，支持 `since/until` **回放**；风险词与情绪词双线 |
 | 企微推送 | `alert/notifier.py` | 窗口聚合 + 分级路由 + 冷却 + 限流 + dry-run；**失败保持 pending 自动重试**（不丢警） |
@@ -194,17 +197,21 @@ positive  [+0.928, +0.999]
 src/wochat/
 ├── config.py              配置（代理/采集/模型/情感/预警/存储）
 ├── cli.py                 命令行入口
+├── console.py             控制台编码兼容（GBK 下 emoji 降级不崩）
 ├── crawler/               L1 采集
 ├── pipeline/              L2 清洗
 ├── analysis/              L3 分析
 ├── store/                 L4 存储
 ├── alert/                 L5 预警
-├── web/app.py             L6 看板
-└── scheduler/             L0 编排（APScheduler，待接入）
+├── web/                   L6 可视化（双入口）
+│   ├── app.py             入口/导航：看板端 + 操作端
+│   ├── dashboard.py       看板端（只读）
+│   └── console.py         操作端（L1~L5 控制与微调）
+└── scheduler/             L0 编排（APScheduler）
 dicts/                     停用词 / 敏感词 / 情感词 / jieba 自定义词典
 data/                      SQLite、原始 JSONL、导出物
 vendor/MediaCrawler/       采集基座（git clone，未修改）
-tests/                     pytest 用例（130 个）+ 情感标注集
+tests/                     pytest 用例（183 个）+ 情感标注集
 ```
 
 词典分工（`dicts/`）：

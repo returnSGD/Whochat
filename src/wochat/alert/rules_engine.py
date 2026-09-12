@@ -99,7 +99,12 @@ class RuleEngine:
         explicit_window = since is not None
         if since is None:
             since = now - timedelta(seconds=window)
-        until = until or (now if explicit_window else None)
+        # until 必须**有上界**，实时模式也不例外。
+        # 之前实时模式 until=None，查询只有下界 publish_time >= since，
+        # 未来时间戳会被算进来。而 parse_time 对无时区字符串按 UTC 解析，
+        # 平台时间多是本地时间（+8h）—— 于是每条评论都会"提前 8 小时"进入
+        # 窗口，冷却期一到就反复误报同一批数据，直到 since 越过它。
+        until = until or now
         comments = self.repo.comments_in_window(since, until=until)
         if not comments:
             return None

@@ -293,12 +293,21 @@ class WeComNotifier:
 
 # ---------------------------------------------------------------- 日报
 
-def build_daily_digest(repo: Repository | None = None, version: str = "v1", hours: int = 24) -> str:
-    """组装日报 —— 低等级告警、统计摘要合并成一条。"""
+def build_daily_digest(
+    repo: Repository | None = None, version: str | None = None, hours: int = 24
+) -> str:
+    """组装日报 —— 低等级告警、统计摘要合并成一条。
+
+    Args:
+        version: 分析版本号。**必须留空让它自动解析** —— 版本号是
+            `{情感后端}-v1`（默认 `lexicon-v1`），此前写死默认 "v1"，
+            导致日报查的版本不存在，情感分布永远是空的（声量 0 条）。
+    """
     repo = repo or Repository()
 
     since = utcnow() - timedelta(hours=hours)
-    dist = repo.sentiment_distribution(version, since=since)
+    version = version or repo.latest_analysis_version()
+    dist = repo.sentiment_distribution(version, since=since) if version else {}
     total = sum(dist.values())
     stats = repo.stats()
 

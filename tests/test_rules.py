@@ -69,6 +69,32 @@ class TestIsSpam:
         "version" 被切成 v+ersion 后误判成广告 —— 违反"宁可漏杀，不可错杀"。"""
         assert is_spam(text) is False
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "商家刷单太明显了，评价全是假的，太失望了",
+            "这个带货主播翻车了，产品质量堪忧",
+            "刷单刷量泛滥，平台该管管了",
+            "也没有乱推广，就是正常分享",
+        ],
+    )
+    def test_negative_mentions_of_ad_words_are_not_spam(self, text):
+        """回归：广告词表里的裸关键词（刷单/带货/推广…）只要出现即判广告，
+        会把**最该被分析的负面舆情**当成广告删掉（is_valid=False，永久排除出
+        情感/主题统计）。业务后缀必须作为第二信号。"""
+        assert is_spam(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "专业刷单服务，包上首页",
+            "代运营团队，有意详谈",
+            "涨粉业务，稳定不掉",
+        ],
+    )
+    def test_actual_ad_service_still_detected(self, text):
+        assert is_spam(text) is True
+
     def test_empty_and_too_short_are_spam(self):
         assert is_spam("") is True
         assert is_spam(None) is True

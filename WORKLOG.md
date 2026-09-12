@@ -423,3 +423,171 @@ README / `.env.example` 里"transformer 更准"的旧说法。
 > `cafd bedd bfe2`（GBK 的"数据库"），**在真实 Windows 控制台显示正常**，
 > 不是 bug，别去"修"它。
 
+---
+
+## 十、第三轮加固（2026-09-12，接力）
+
+第二轮把测试补到 130 个，这一轮**接着往下挖**：分两路审计各层真实缺陷，
+逐条复现后修复，并把"只能靠人眼确认"的看板渲染变成可回归的测试。
+
+**测试：130 → 171 个（+2 xfail 不变）**；`cli demo` 端到端退出 0，
+落库/告警数字与第二轮基线一致；情感标注集仍 **90.91%**，无回归。
+
+### 10.1 三个最严重的发现
+
+**① README 的头号命令 `cli demo` 在本机默认控制台根本跑不完**
+
+```
+UnicodeEncodeError: 'gbk' codec can't encode character '\U0001f534'
+  at notifier.flush() → print(content)
+EXIT=1
+```
+
+Windows 控制台默认编码是 **GBK**，编码不了 emoji；而 `notifier.flush()` 的
+dry-run 分支把带 emoji 的企微 markdown 直接 `print` 出来，于是 demo 在
+"快通道预警"那一步崩溃，后面的词云端与汇总全没跑（退出码 1）。
+第二轮是在 UTF-8 终端里跑的，所以没暴露。
+
+修法不是删 emoji（那是发给企微群的，UTF-8 下完全正常），而是新增
+`wochat/console.py::configure_console()`，把 stdout 的 `errors` 从 strict
+改成 replace：GBK 能编码的中文照常，emoji 退化成 `?`，不再崩。
+在 `cli.main()` 与 `scheduler.main()` 两个入口调用。
+
+**② 发送失败的告警等不到重试，6 小时后被 expire 永久丢警**
+
+`job_fast_alert` 把 `notifier.flush()` 包在 `if alert_ids:` 里 —— 只有本轮
+产生了新告警才推送。但 `flush()` 的设计是"发送失败保持 pending，下个周期
+自动重试"；下个周期若没有新告警，flush 根本不被调用，那批 pending 一直
+搁着，直到 `expire_stale_alerts`（6h）把它标成 `failed`。企微返回
+`45009 限流` 或一次网络抖动就足以触发。对预警系统来说这是最糟的故障。
+
+修复：flush **无条件**每个周期执行，与是否产生新告警解耦。
+
+**③ upsert 用 None 覆盖已有值，重复采集把 `publish_time` 清成 NULL**
+
+`upsert_comments/upsert_contents` 的 update 分支对整个 payload `setattr`，
+而归一化记录**始终带 `publish_time` 键**（别名没命中时为 None）。于是某次
+采集缺这个字段，就会把库里原本有效的时间戳清空 —— 该评论从此掉出所有
+按时间窗的查询（`comments_in_window` 要求 `publish_time IS NOT NULL`），
+快通道漏警、趋势图失真，且再也回不来。注释里"publish_time 等不变"与实际
+行为相悖。修复：update 时 **None 不覆盖已有值**。
+
+### 10.2 其余缺陷（按严重度）
+
+| # | 位置 | 问题 | 影响 |
+|---|---|---|---|
+| 1 | `crawler/mediacrawler_source.py` | MediaCrawler 按天复用文件名，同一天是**追加**；旧代码用"文件名集合差"判新文件，差集为空就回退读本平台**所有日期**的文件 | 每次采集把全量历史重灌：旧内容 `search_keyword` 被当前关键词改写、快照表灌水。改为按 **(mtime, size)** 判断本次是否被写过；没写入就不产出，而不是重读历史 |
+| 2 | `crawler/normalize.py` | 别名表缺 MediaCrawler 的真实作者字段 `creator_hash` / `user_nickname` | **真实采集的作者 ID 恒为 NULL**，KOL 识别/作者聚合完全失效。已对照 `vendor/MediaCrawler` 各平台 store 逐一确认 |
+| 3 | `crawler/normalize.py` | 缺各平台真实字段别名：bilibili `video_comment`/`video_share_count`/`video_favorite_count`/`video_type`、weibo `comment_like_count`、zhihu `content_text`/`created_time`/`content_url`、douyin `aweme_type`、kuaishou `video_type` | 真实采集的正文/互动量/发布时间静默为 NULL |
+| 4 | `crawler/normalize.py` | bilibili 顶层评论固定写 `parent_comment_id="0"`，被当成有父评论 | 一级评论全量误标 `level=2` 并挂到不存在的父 "0"，线程/传播统计失真 |
+| 5 | `pipeline/rules.py` | `is_spam` 的裸关键词正则（刷单/带货/推广…）出现即判广告 | "商家刷单太明显了，太失望了"这类**最该被分析的负面舆情**被当广告删掉（`is_valid=False`），永久排除出情感/主题统计。改为要求业务后缀作第二信号 |
+| 6 | `pipeline/dedup.py` | 去重指纹走 `clean()`，把 emoji 抹成空格 | "这个产品真的很好用😀" 与 "…😡" 指纹相同 → 后者被标 duplicate、永不进入情感分析。emoji 是中文社媒主要极性信号。新增 `clean(keep_emoji=True)` 专供指纹，emoji 范围抽成 `EMOJI_CLASS_BODY` 常量复用 |
+| 7 | `alert/rules_engine.py` | 实时模式 `until=None`，查询只有下界 | 未来时间戳被计入。`parse_time` 对无时区字符串按 UTC 解析，平台本地时间（+8h）会"落在未来 8 小时"，冷却一到就反复误报同一批。改为 `until = until or now` |
+| 8 | `alert/notifier.py` | 日报版本号写死 `"v1"`，实际是 `lexicon-v1` | 日报情感分布恒为空（"声量 0 条"），恰好给出"风平浪静"的错误结论。新增 `Repository.latest_analysis_version()` 自动解析 |
+| 9 | `analysis/timeseries.py` | 只抓到 `parent_content_id`、没抓粉丝数时，`available=True` 后按全 0 排序输出 KOL 榜 | 伪造一个"看起来有模有样"的榜单。改为按字段分别判定能力，缺就跳过并声明缺失 |
+| 10 | `store/repository.py` | 归因 `search_keyword` 每次采集都被后来者覆盖 | 同一内容被多个监控词命中时，"这条舆情是哪个词发现的"永久错乱。改为**首次带值后不再改写** |
+| 11 | `web/app.py` | 侧边栏选了平台/时间，趋势图过滤了，但"讨论区情绪分布""负面占比""负面 TOP"仍是全量 | 同一屏两个数字互相矛盾。筛选参数贯穿全部查询 |
+| 12 | `crawler/base.py` | `comment_record` 缺 `content_record` 已有的防御性 `author_id` 丢弃 | 调用方传 `author_id=` 会覆盖脱敏值，"原始 ID 永不落库"不是无条件成立。当前调用方都合规，属潜伏缺陷 |
+| 13 | `pipeline/dedup.py` | `dedupe(threshold=…)` 在装了 datasketch 时被静默忽略（MinHash 固定 0.8） | 两种阈值量纲不同不能通用。新增 `jaccard_threshold` 显式入口 |
+| 14 | `crawler/normalize.py` | `parse_count` 正则非锚定：`"1.2.3"→1`、`"1e3"→1` | 静默产生错误数字，比返回 None 危险。改为整串 fullmatch，并容忍"约/近/超过"前缀 |
+
+### 10.3 看板渲染：从"靠人眼"变成可回归
+
+第二轮遗留"看板图表仍需人眼确认"。这一轮加了 `tests/test_dashboard.py`，
+用 Streamlit 官方 `AppTest` **真正执行** `app.py`：6 个 tab 的查询函数、
+图表组装、筛选参数全部跑一遍，任何异常都会被捕获。
+
+> HTTP 200 其实只证明 Streamlit 起得来（返回的是静态外壳），脚本要等会话
+> 连接才执行 —— 所以之前那个"HTTP 200"并不构成渲染验证。
+
+### 10.4 已知取舍（未改，但记录在案）
+
+| 项 | 说明 |
+|---|---|
+| dry-run 把告警标 `skipped` | 未配 webhook 时，`flush` 打印后标记 `skipped` 而非保留 pending。这意味着先无 webhook 跑一段时间、之后才配 webhook 的话，那些历史告警不会补发。**这是有意的**：否则首配 webhook 时会被积压告警刷屏。真实部署应在启动前配好 webhook |
+| 人工导入的 `{id, content, note_id}` | 无 title、同时含通用 `id` 与 `content` 的记录，内容/评论二义性无法可靠区分。当前按评论处理（`note_id` 作为归属），可能丢失内容的 title/url 等字段。人工整理的数据建议显式带 type 字段 |
+| `raw_json` 保留平台原始 `user_id` | 与"原始 ID 永不落库"字面冲突，但这是"采集不可逆、raw_json 是唯一后悔药"的已知取舍（有测试固化） |
+
+### 10.5 本轮验证过的命令
+
+```bash
+python -m pytest -q                     # 182 passed, 2 xfailed
+python -m wochat.cli demo               # 退出 0，内容 60 / 评论 1928 / 分析 1164
+python -m wochat.cli evaluate tests/annotated_sample.json   # 90.91%
+python -m wochat.scheduler.jobs --once daily_report         # 日报有真实数字
+python -m streamlit run src/wochat/web/app.py               # AppTest 6 tab 无异常
+```
+
+---
+
+## 十一、传播曲线 + 传播路径可视化（2026-09-12，Phase 3）
+
+方案文档 Phase 3 的明确条目。**数据早就在采了，只是展示层一直没用起来**：
+`metric_snapshots` 每次采集都写，看板却只看得到条数；`parent_content_id`
+是 ADR#4 专门强调"不可逆、必须抓"的字段，但页面上只显示一个覆盖率。
+
+### 11.1 新增
+
+| 位置 | 内容 |
+|---|---|
+| `analysis/propagation.py` | `build_curve()` 曲线点、`analyze_growth()` 起爆点/峰值/增速拐点/平均增速、`build_graph()` 传播路径图、`to_dot()` 生成 Graphviz DOT |
+| `store/repository.py` | `snapshot_series(content_id)`、`contents_with_snapshots()`（读接口此前完全缺失） |
+| `crawler/mock_source.py` | **造转发/引用链**。此前 `parent_content_id` 恒为 `None`，传播路径这条链路在 demo 里从未被跑过 —— 做出来也没数据可验证 |
+| `web/app.py` | 传播 tab 拆成「传播曲线」与「传播路径 / KOL」两段；曲线用 `st.line_chart`，路径用 `st.graphviz_chart`（DOT 字符串前端渲染，不依赖本地 graphviz） |
+
+### 11.2 诚实边界（延续项目一贯口径）
+
+- **只有 1 个快照点就不画曲线** —— 那只是一张快照，不是传播。明确提示需要至少 2 次采集。
+- **悬空父引用不入图** —— 真实采集里父内容可能不在同批数据中，画成孤立节点会误导；悬空数量单独列出。
+- **没有粉丝数就不排 KOL 榜**（第三轮修的 #9）。
+
+### 11.3 验证
+
+- 测试 **171 → 182**（新增 `tests/test_propagation.py` 11 条，并强化看板 AppTest 的种子数据，让曲线与关系图分支真的被执行）。
+- `demo` 退出 0，落库/告警数字与基线一致（转发链不改变记录条数）。
+- 看板 AppTest：6 个 tab 无异常，"选择内容"下拉出现，无 warning。
+
+---
+
+## 十二、双入口可视化：看板端 + 操作端（2026-09-12）
+
+原来只有一个 Streamlit 页面，既是看板又没有任何控制能力 —— 调预警规则、
+跑分析全得回命令行。这一轮拆成**两个入口**：
+
+```
+web/app.py        入口（st.navigation）
+  ├── dashboard.py   📊 看板端 —— 只读
+  └── console.py     🎛️ 操作端 —— 可写
+```
+
+**为什么要分开**：看板是长时间开着、"随手看一眼"的页面；操作端是改参数、
+触发动作的地方。混在一起的话一个误点就可能重跑分析或改掉预警规则。
+这也正好落在方案文档 §5.1 那条"存储层 / 展示层"边界上。
+
+### 12.1 操作端（L1~L5）
+
+| 分区 | 能做什么 |
+|---|---|
+| L1 采集 | 选后端/平台/模式/关键词/上限/二级评论触发采集（mock 或 MediaCrawler）；导入本地文件；查看采集任务队列；一键跑 demo 自检 |
+| L2 清洗 | 展示当前生效的采集参数、LLM 就绪状态、去重后端；**广告规则试跑**（输入一条评论，看 `is_spam` / 清洗后文本 / 分词）；脱敏试跑 |
+| L3 分析 | 触发情感分析（可指定版本与条数）、主题建模、词云；标注集评估（可切后端）；查看各版本情感分布 |
+| L4 存储 | 各表统计、平台/情感分布、数据库连接串 |
+| L5 预警 | **规则 CRUD**（等级/窗口/冷却/数量阈值/负面占比/关键词/情感过滤/敏感词开关，改完立即生效，无需重启）；实时跑或回放（since/until/跳过冷却）；实时/日报/仅预览三种推送；最近告警与推送错误 |
+
+动作全部走 `python -m wochat.cli ...` 子进程执行（复用已编排好的流程，
+且崩了不会带走看板），输出原样回显在页面上。长耗时动作会阻塞页面，
+页面已提示"终端里跑更直观"。
+
+### 12.2 顺带补的接口
+
+- `Repository.all_rules()`（含禁用规则，管理列表要用）与 `delete_rule()`
+- 规则编辑采用"合并回 conditions"的策略：**未知键保留**，将来加规则类型不会
+  被编辑器吞掉
+
+### 12.3 验证
+
+- 测试 **182 → 183**：新增 `tests/test_console.py`（操作端 5 个分层 tab +
+  规则编辑器渲染无异常）；看板端 AppTest 在 `st.navigation` 下仍为 6 tab。
+- 真实服务：`/`、`/dashboard`、`/console` 三个路由均 HTTP 200，启动日志无异常。
+- `tests/test_dashboard.py` 无需改动 —— 默认页仍是看板端，6 tab 断言继续成立。
+

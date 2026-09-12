@@ -63,9 +63,10 @@ _RE_MENTION = re.compile(r"@[\w一-鿿\-_]{1,30}")
 _RE_TOPIC = re.compile(r"#([^#]{1,50})#")
 _RE_HTML = re.compile(r"<[^>]+>")
 _RE_ZERO_WIDTH = re.compile(r"[​-‏‪-‮﻿]")
-_RE_EMOJI = re.compile(
-    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF←-⇿⬀-⯿]"
-)
+# emoji 的字符范围抽成常量：去重指纹需要**保留** emoji（emoji 是极性信号，
+# 😀 和 😡 不能因为正文相同就被判成同一条），而清洗正文时需要去掉它。
+EMOJI_CLASS_BODY = r"\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF←-⇿⬀-⯿"
+_RE_EMOJI = re.compile(f"[{EMOJI_CLASS_BODY}]")
 _RE_WS = re.compile(r"\s+")
 _RE_CN = re.compile(r"[一-鿿]")
 
@@ -86,7 +87,11 @@ _SPAM_PATTERNS = [
     # 联系方式 + 引导动作（私聊/详聊/咨询/领取）
     re.compile(rf"{_CONTACT}\s*[信号码]?\s*[:：,，]?\s*{_ID}"),
     re.compile(r"(私聊|私信|详聊|咨询|联系)\s*(我|本人|博主)"),
-    re.compile(r"(代运营|刷单|刷量|涨粉|推广|引流|带货)\s*(服务|公司|团队)?"),
+    # 业务后缀是**必需**的第二信号，不能只凭关键词就判广告。
+    # 之前后缀可选，"商家刷单太明显了，评价全是假的，太失望了"、"这个带货主播翻车了"
+    # 这类最该被分析的负面舆情会被当成广告删掉（is_valid=False），
+    # 等于把炮火最集中的评论从情感/主题统计里抹掉 —— 违反"宁可漏杀不可错杀"。
+    re.compile(r"(代运营|刷单|刷量|涨粉|推广|引流|带货)\s*(服务|公司|团队|工作室|平台|业务|接单)"),
     re.compile(r"(优惠券|折扣|特价|清仓|秒杀|福利).{0,12}(链接|点击|领取|下单|私信|主页)"),
     re.compile(r"(点击|戳)\s*(链接|这里|主页|下方)"),
     # 纯数字/字母长串（QQ号、微信号、网址残留）
@@ -95,15 +100,21 @@ _SPAM_PATTERNS = [
 ]
 
 
-def clean(text: str | None, *, keep_topic: bool = True) -> str:
-    """通用清洗。保留语义，只去噪声。"""
+def clean(text: str | None, *, keep_topic: bool = True, keep_emoji: bool = False) -> str:
+    """通用清洗。保留语义，只去噪声。
+
+    `keep_emoji=True` 用于去重指纹：emoji 在中文社媒里是主要的极性信号，
+    "这个产品真的很好用😀" 和 "这个产品真的很好用😡" 绝不能因为正文相同
+    就被判为精确重复（否则后一条会被静默删掉，情感分布被系统性偏置）。
+    """
     if not text:
         return ""
     t = _RE_HTML.sub(" ", text)
     t = _RE_URL.sub(" ", t)
     t = _RE_MENTION.sub(" ", t)
     t = _RE_ZERO_WIDTH.sub("", t)
-    t = _RE_EMOJI.sub(" ", t)
+    if not keep_emoji:
+        t = _RE_EMOJI.sub(" ", t)
     if keep_topic:
         # 话题标签保留内容（#iPhone17# → iPhone17），因为话题本身就是主题信号
         t = _RE_TOPIC.sub(r"\1", t)
