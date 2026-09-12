@@ -11,8 +11,8 @@ from __future__ import annotations
 
 class TestFastAlertAlwaysFlushes:
     def test_flush_called_even_without_new_alerts(self, repo, monkeypatch):
-        import wochat.alert.notifier as noti_mod
-        import wochat.alert.rules_engine as rules_mod
+        import Whochat.alert.notifier as noti_mod
+        import Whochat.alert.rules_engine as rules_mod
 
         calls: list[str] = []
 
@@ -34,7 +34,7 @@ class TestFastAlertAlwaysFlushes:
         monkeypatch.setattr(rules_mod, "RuleEngine", FakeEngine)
         monkeypatch.setattr(noti_mod, "WeComNotifier", FakeNotifier)
 
-        from wochat.scheduler.jobs import job_fast_alert
+        from Whochat.scheduler.jobs import job_fast_alert
 
         job_fast_alert()
 

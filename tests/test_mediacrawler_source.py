@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from wochat.crawler.base import CrawlTask
-from wochat.crawler.mediacrawler_source import MediaCrawlerSource
+from Whochat.crawler.base import CrawlTask
+from Whochat.crawler.mediacrawler_source import MediaCrawlerSource
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def mc(tmp_path, monkeypatch):
 
     src = MediaCrawlerSource(crawler_dir=crawler_dir, output_dir=output_dir)
 
-    import wochat.crawler.mediacrawler_source as mod
+    import Whochat.crawler.mediacrawler_source as mod
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0))
     return src, jsonl_dir
@@ -57,7 +57,7 @@ def test_old_days_not_reread_when_new_file_appears(mc, monkeypatch):
     src, jsonl_dir = mc
     _write(jsonl_dir / "search_contents_2026-01-01.jsonl", {"note_id": "OLD", "title": "旧内容"})
 
-    import wochat.crawler.mediacrawler_source as mod
+    import Whochat.crawler.mediacrawler_source as mod
 
     def fake_run(*a, **k):
         _write(jsonl_dir / "search_contents_2026-09-12.jsonl", {"note_id": "NEW", "title": "新内容"})
@@ -75,7 +75,7 @@ def test_appended_same_day_file_is_detected(mc, monkeypatch):
     path = jsonl_dir / "search_contents_2026-09-12.jsonl"
     _write(path, {"note_id": "FIRST", "title": "第一条"})
 
-    import wochat.crawler.mediacrawler_source as mod
+    import Whochat.crawler.mediacrawler_source as mod
 
     def fake_run(*a, **k):
         with open(path, "a", encoding="utf-8") as f:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from wochat.store.models import Comment, RawContent
+from Whochat.store.models import Comment, RawContent
 
 
 def _comment(**over) -> dict:

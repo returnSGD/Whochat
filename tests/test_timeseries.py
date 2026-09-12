@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from wochat.analysis.timeseries import propagation_metrics
+from Whochat.analysis.timeseries import propagation_metrics
 
 
 def _content(cid: str, *, parent=None, followers=None):

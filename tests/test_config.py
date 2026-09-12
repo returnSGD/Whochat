@@ -10,26 +10,26 @@ from pathlib import Path
 
 import pytest
 
-from wochat.config import ROOT, _abs_from_root, _env_bool, _resolve_db_url
+from Whochat.config import ROOT, _abs_from_root, _env_bool, _resolve_db_url
 
 
 class TestEnvBool:
     @pytest.mark.parametrize("raw", ["1", "true", "TRUE", "True", "yes", "y", "on", "是"])
     def test_truthy(self, monkeypatch, raw):
-        """回归：原来只认字符串 "true"，`WOCHAT_LLM_ENABLED=1` 会被静默当成 False，
+        """回归：原来只认字符串 "true"，`WHOCHAT_LLM_ENABLED=1` 会被静默当成 False，
         用户以为开了 LLM 清洗，实际没开且没有任何提示。"""
-        monkeypatch.setenv("WOCHAT_TEST_FLAG", raw)
-        assert _env_bool("WOCHAT_TEST_FLAG") is True
+        monkeypatch.setenv("WHOCHAT_TEST_FLAG", raw)
+        assert _env_bool("WHOCHAT_TEST_FLAG") is True
 
     @pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "garbage"])
     def test_falsy(self, monkeypatch, raw):
-        monkeypatch.setenv("WOCHAT_TEST_FLAG", raw)
-        assert _env_bool("WOCHAT_TEST_FLAG") is False
+        monkeypatch.setenv("WHOCHAT_TEST_FLAG", raw)
+        assert _env_bool("WHOCHAT_TEST_FLAG") is False
 
     def test_default_when_unset(self, monkeypatch):
-        monkeypatch.delenv("WOCHAT_TEST_FLAG", raising=False)
-        assert _env_bool("WOCHAT_TEST_FLAG", True) is True
-        assert _env_bool("WOCHAT_TEST_FLAG") is False
+        monkeypatch.delenv("WHOCHAT_TEST_FLAG", raising=False)
+        assert _env_bool("WHOCHAT_TEST_FLAG", True) is True
+        assert _env_bool("WHOCHAT_TEST_FLAG") is False
 
 
 class TestAbsFromRoot:
@@ -50,22 +50,22 @@ class TestResolveDbUrl:
     def test_relative_sqlite_path_is_absolute(self, monkeypatch):
         """回归：.env.example 给的示例是相对路径，SQLAlchemy 会相对 CWD 解析，
         不是从项目根目录启动就报 unable to open database file。"""
-        monkeypatch.setenv("WOCHAT_DB_URL", "sqlite:///data/db/wochat.db")
+        monkeypatch.setenv("WHOCHAT_DB_URL", "sqlite:///data/db/Whochat.db")
         url = _resolve_db_url()
         assert url.startswith("sqlite:///")
         path = Path(url[len("sqlite:///") :])
         assert path.is_absolute()
-        assert path == (ROOT / "data/db/wochat.db").resolve()
+        assert path == (ROOT / "data/db/Whochat.db").resolve()
 
     def test_memory_db_is_untouched(self, monkeypatch):
-        monkeypatch.setenv("WOCHAT_DB_URL", "sqlite:///:memory:")
+        monkeypatch.setenv("WHOCHAT_DB_URL", "sqlite:///:memory:")
         assert _resolve_db_url() == "sqlite:///:memory:"
 
     def test_postgres_url_is_untouched(self, monkeypatch):
-        monkeypatch.setenv("WOCHAT_DB_URL", "postgresql+psycopg://u:p@localhost:5432/wochat")
-        assert _resolve_db_url() == "postgresql+psycopg://u:p@localhost:5432/wochat"
+        monkeypatch.setenv("WHOCHAT_DB_URL", "postgresql+psycopg://u:p@localhost:5432/Whochat")
+        assert _resolve_db_url() == "postgresql+psycopg://u:p@localhost:5432/Whochat"
 
     def test_default_is_absolute(self, monkeypatch):
-        monkeypatch.delenv("WOCHAT_DB_URL", raising=False)
+        monkeypatch.delenv("WHOCHAT_DB_URL", raising=False)
         url = _resolve_db_url()
         assert Path(url[len("sqlite:///") :]).is_absolute()

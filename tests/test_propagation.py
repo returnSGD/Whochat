@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from wochat.analysis.propagation import (
+from Whochat.analysis.propagation import (
     CurvePoint,
     analyze_growth,
     build_curve,
@@ -134,8 +134,8 @@ class TestMockProducesPropagationChain:
     def test_mock_has_valid_parent_references(self):
         """回归：mock 曾经把 parent_content_id 恒置 None，
         传播路径这条链路在 demo 里从未被跑过，做出来也没数据可验证。"""
-        from wochat.crawler.base import CrawlTask
-        from wochat.crawler.mock_source import MockSource
+        from Whochat.crawler.base import CrawlTask
+        from Whochat.crawler.mock_source import MockSource
 
         task = CrawlTask(platform="mock", mode="keyword", target="某品牌", max_items=600)
         contents = [r for r in MockSource().crawl(task) if "content_id" in r]

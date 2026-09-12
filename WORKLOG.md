@@ -37,14 +37,14 @@
 ## 二、已验证的产出
 
 ```
-python -m wochat.cli init          # 环境自检 6 项全通过
-python -m wochat.cli demo          # 端到端：1988 评论 → 过滤 774 → 分析 1214
-python -m wochat.cli topics        # 离线方案 6 个主题
-python -m wochat.cli wordcloud     # wordcloud.png 1200×800
-python -m wochat.cli evaluate      # 情感准确率 90.9%
-python -m wochat.cli import ...    # JSONL 导入 + 字段归一化
-python -m wochat.cli status        # 数据统计
-python -m wochat.cli dashboard     # localhost:6666 → HTTP 200
+python -m Whochat.cli init          # 环境自检 6 项全通过
+python -m Whochat.cli demo          # 端到端：1988 评论 → 过滤 774 → 分析 1214
+python -m Whochat.cli topics        # 离线方案 6 个主题
+python -m Whochat.cli wordcloud     # wordcloud.png 1200×800
+python -m Whochat.cli evaluate      # 情感准确率 90.9%
+python -m Whochat.cli import ...    # JSONL 导入 + 字段归一化
+python -m Whochat.cli status        # 数据统计
+python -m Whochat.cli dashboard     # localhost:6666 → HTTP 200
 ```
 
 **关键验证点**：
@@ -151,10 +151,10 @@ unset HF_ENDPOINT                    # 不要设成镜像
 
 - [ ] **真实采集** —— MediaCrawler 首次运行需**扫码登录**，需要人工介入。
       建议第一步先跑 `--platform weibo`（反爬最松）验证链路
-- [ ] **企微推送真发** —— 当前只跑过 dry-run。需在 `.env` 填 `WOCHAT_WECOM_WEBHOOK`
+- [ ] **企微推送真发** —— 当前只跑过 dry-run。需在 `.env` 填 `WHOCHAT_WECOM_WEBHOOK`
 - [ ] **本地 LLM 清洗** —— 需 `ollama pull qwen2.5:14b-instruct-q4_K_M`
 - [ ] **Transformer 情感后端** —— 需下载 Erlangshen 权重
-- [ ] **调度器实跑** —— `python -m wochat.scheduler.jobs` 未启动过
+- [ ] **调度器实跑** —— `python -m Whochat.scheduler.jobs` 未启动过
 - [ ] **看板页面目视确认** —— HTTP 200 + 数据层单测通过，但没逐个人眼看过图表渲染
 
 ### 待补
@@ -183,7 +183,7 @@ unset HF_ENDPOINT                    # 不要设成镜像
 
 按优先级：
 
-1. **确认 BERTopic 下载结果** —— 联网后重跑 `python -m wochat.cli topics`
+1. **确认 BERTopic 下载结果** —— 联网后重跑 `python -m Whochat.cli topics`
 2. **跑一次真实采集**（`--platform weibo` 最稳），验证 MediaCrawler 适配器端到端
 3. **建业务标注集**（300~500 条）重测情感准确率 —— 这是后面所有分析结论的地基
 4. **配企微 webhook**，验证真实推送
@@ -201,7 +201,7 @@ WORKLOG.md                   本文档
 .env.example                 配置模板（含网络实测结论）
 pyproject.toml
 
-src/wochat/
+src/Whochat/
 ├── config.py                157 行   配置
 ├── cli.py                   569 行   命令行入口
 ├── crawler/
@@ -314,8 +314,8 @@ seed = hash((task.platform, task.mode, task.target)) & 0xFFFFFFFF
 | 9 | `crawler/manual_source.py` | 分类只认字面量 `comment_id` | `{id:…}` 被当内容、`{cid:…}`/`{rpid:…}` 被静默丢弃 |
 | 10 | `crawler/manual_source.py` | CSV 写死 `utf-8-sig` | 中文 Windows 的 Excel 默认导出 GBK，**直接崩** |
 | 11 | `cli.py` → `runner._dump_raw` | `task.target` 为空时迭代 `None` | **README 演示的 `import xxx.jsonl --platform xhs`（不带 --keyword）必崩** |
-| 12 | `config.py` | 相对 `WOCHAT_DB_URL` 按 CWD 解析 | 不从项目根启动就 `unable to open database file` |
-| 13 | `config.py` | 布尔只认字符串 `"true"` | `WOCHAT_LLM_ENABLED=1` 被静默当 False |
+| 12 | `config.py` | 相对 `WHOCHAT_DB_URL` 按 CWD 解析 | 不从项目根启动就 `unable to open database file` |
+| 13 | `config.py` | 布尔只认字符串 `"true"` | `WHOCHAT_LLM_ENABLED=1` 被静默当 False |
 | 14 | `scheduler/jobs.py` | 自定义 SIGINT 处理器替换了默认处理器，`_running` 标志位无人读 | **Ctrl+C 完全没反应**，只能杀进程 |
 | 15 | `scheduler/jobs.py` | 4 个 job 的 `repo.close()` 不在 `finally` 里 | 异常路径漏连接，每分钟一次的 job 很快耗光连接池 |
 | 16 | `analysis/topics.py` | `aggregate_by_content` 收下 `version` 却不用 | 主题建模吃进了广告和未分析的评论 |
@@ -411,14 +411,14 @@ README / `.env.example` 里"transformer 更准"的旧说法。
 
 | 事项 | 命令 / 前置条件 |
 |---|---|
-| **真实采集** | `python -m wochat.cli crawl --platform weibo --keyword "你的词"` —— 首次需扫码登录 |
-| **企微真发** | 在 `.env` 填 `WOCHAT_WECOM_WEBHOOK`（当前只跑过 dry-run） |
-| **本地 LLM 清洗** | `ollama pull qwen2.5:14b-instruct-q4_K_M` 且 `.env` 设 `WOCHAT_LLM_ENABLED=true`（`ollama` 包本身也没装） |
+| **真实采集** | `python -m Whochat.cli crawl --platform weibo --keyword "你的词"` —— 首次需扫码登录 |
+| **企微真发** | 在 `.env` 填 `WHOCHAT_WECOM_WEBHOOK`（当前只跑过 dry-run） |
+| **本地 LLM 清洗** | `ollama pull qwen2.5:14b-instruct-q4_K_M` 且 `.env` 设 `WHOCHAT_LLM_ENABLED=true`（`ollama` 包本身也没装） |
 | **Transformer 情感后端** | 权重已下、链路已通，但实测只有 60.6%（模型是二分类，见 §9.4）—— **要换三分类模型才值得用** |
 | **建业务标注集 300~500 条** | 33 条只证明链路可用，**不是**准确率有 90.91% |
-| **看板图表人眼确认** | `python -m wochat.cli dashboard` → localhost:6666 |
+| **看板图表人眼确认** | `python -m Whochat.cli dashboard` → localhost:6666 |
 
-> ⚠️ 顺手记一条**踩坑记录**：`python -m wochat.cli init` 在 Git Bash 里
+> ⚠️ 顺手记一条**踩坑记录**：`python -m Whochat.cli init` 在 Git Bash 里
 > 看着是乱码，但那是管道按 UTF-8 解码造成的假象 —— 实测 Python 输出的是
 > `cafd bedd bfe2`（GBK 的"数据库"），**在真实 Windows 控制台显示正常**，
 > 不是 bug，别去"修"它。
@@ -449,7 +449,7 @@ dry-run 分支把带 emoji 的企微 markdown 直接 `print` 出来，于是 dem
 第二轮是在 UTF-8 终端里跑的，所以没暴露。
 
 修法不是删 emoji（那是发给企微群的，UTF-8 下完全正常），而是新增
-`wochat/console.py::configure_console()`，把 stdout 的 `errors` 从 strict
+`Whochat/console.py::configure_console()`，把 stdout 的 `errors` 从 strict
 改成 replace：GBK 能编码的中文照常，emoji 退化成 `?`，不再崩。
 在 `cli.main()` 与 `scheduler.main()` 两个入口调用。
 
@@ -512,10 +512,10 @@ dry-run 分支把带 emoji 的企微 markdown 直接 `print` 出来，于是 dem
 
 ```bash
 python -m pytest -q                     # 182 passed, 2 xfailed
-python -m wochat.cli demo               # 退出 0，内容 60 / 评论 1928 / 分析 1164
-python -m wochat.cli evaluate tests/annotated_sample.json   # 90.91%
-python -m wochat.scheduler.jobs --once daily_report         # 日报有真实数字
-python -m streamlit run src/wochat/web/app.py               # AppTest 6 tab 无异常
+python -m Whochat.cli demo               # 退出 0，内容 60 / 评论 1928 / 分析 1164
+python -m Whochat.cli evaluate tests/annotated_sample.json   # 90.91%
+python -m Whochat.scheduler.jobs --once daily_report         # 日报有真实数字
+python -m streamlit run src/Whochat/web/app.py               # AppTest 6 tab 无异常
 ```
 
 ---
@@ -574,7 +574,7 @@ web/app.py        入口（st.navigation）
 | L4 存储 | 各表统计、平台/情感分布、数据库连接串 |
 | L5 预警 | **规则 CRUD**（等级/窗口/冷却/数量阈值/负面占比/关键词/情感过滤/敏感词开关，改完立即生效，无需重启）；实时跑或回放（since/until/跳过冷却）；实时/日报/仅预览三种推送；最近告警与推送错误 |
 
-动作全部走 `python -m wochat.cli ...` 子进程执行（复用已编排好的流程，
+动作全部走 `python -m Whochat.cli ...` 子进程执行（复用已编排好的流程，
 且崩了不会带走看板），输出原样回显在页面上。长耗时动作会阻塞页面，
 页面已提示"终端里跑更直观"。
 
@@ -590,4 +590,34 @@ web/app.py        入口（st.navigation）
   规则编辑器渲染无异常）；看板端 AppTest 在 `st.navigation` 下仍为 6 tab。
 - 真实服务：`/`、`/dashboard`、`/console` 三个路由均 HTTP 200，启动日志无异常。
 - `tests/test_dashboard.py` 无需改动 —— 默认页仍是看板端，6 tab 断言继续成立。
+
+---
+
+## 十三、全项目改名 wochat → Whochat（2026-09-12）
+
+内部包名从项目一开始就少了一个 `h`（`wochat`），而仓库名是 `Whochat` ——
+**正确的拼写在整个代码库里只出现过 1 次**（README 的命名说明），其余 229 处
+`wochat`、`WOCHAT_*` 环境变量、`Wochat` 全是被带偏的写法。这次统一更正。
+
+改动范围（47 个文件）：
+
+| 类别 | 变更 |
+|---|---|
+| 包目录 | `src/wochat/` → `src/Whochat/`（`git mv`，保留历史） |
+| 导入 | `from wochat.x import ...` → `from Whochat.x import ...` |
+| 命令 | `python -m wochat.cli ...` → `python -m Whochat.cli ...` |
+| 环境变量 | `WOCHAT_*` → `WHOCHAT_*`（`.env` 需同步改名） |
+| 默认库文件 | `data/db/wochat.db` → `data/db/Whochat.db` |
+| 分发名 | `pyproject.toml` `name = "Whochat"` |
+| 文档 | README / WORKLOG / 方案文档同步 |
+
+配套操作：本地库文件已**改名保留**（不丢数据）；卸载旧 `wochat` editable 安装、
+清掉旧 `src/wochat.egg-info` 与 `__pycache__`，重新 `pip install -e .`。
+
+验证：`pytest -q` 183 passed / 2 xfailed；`init` / `status` 正常且读到的仍是
+原有数据（60 内容 / 1928 评论 / 1164 分析）；`WHOCHAT_DATA_DIR` 隔离 demo 退出 0；
+`/`、`/dashboard`、`/console` 三路由 HTTP 200。
+
+> ⚠️ 破坏性提示：若你在别处有 `.env` 或外部脚本，`WOCHAT_*` 环境变量名和
+> `python -m wochat.cli` 命令都需要一起改。
 

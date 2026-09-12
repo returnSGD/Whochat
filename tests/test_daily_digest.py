@@ -7,7 +7,7 @@
    永远空，日报里"声量 0 条"，等于日报的核心内容一直是坏的。
 2. `notifier.flush()` 的 dry-run 分支会把带 emoji 的企微文案 `print` 到
    控制台。Windows 默认控制台是 GBK，编码不了 emoji，抛
-   UnicodeEncodeError —— README 的头号命令 `python -m wochat.cli demo`
+   UnicodeEncodeError —— README 的头号命令 `python -m Whochat.cli demo`
    因此跑到一半就崩（退出码 1），后面的词云与汇总全没跑。
 """
 
@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import io
 
-from wochat.alert.notifier import build_daily_digest
-from wochat.console import configure_console
-from wochat.pipeline.runner import Pipeline
-from wochat.store.models import utcnow
+from Whochat.alert.notifier import build_daily_digest
+from Whochat.console import configure_console
+from Whochat.pipeline.runner import Pipeline
+from Whochat.store.models import utcnow
 
 NEG = "发热严重，售后也联系不上，太失望了"
 POS = "物流很快，包装完好，客服态度也不错"

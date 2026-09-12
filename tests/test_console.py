@@ -14,9 +14,9 @@ pytest.importorskip("streamlit", reason="操作端属于可选依赖 pip install
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
-from wochat.alert.rules_engine import seed_default_rules  # noqa: E402
+from Whochat.alert.rules_engine import seed_default_rules  # noqa: E402
 
-CONSOLE = Path(__file__).resolve().parents[1] / "src" / "wochat" / "web" / "console.py"
+CONSOLE = Path(__file__).resolve().parents[1] / "src" / "Whochat" / "web" / "console.py"
 
 
 def test_console_renders_all_layer_tabs(repo):

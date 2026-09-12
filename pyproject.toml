@@ -1,5 +1,5 @@
 [project]
-name = "wochat"
+name = "Whochat"
 version = "0.1.0"
 description = "舆情分析 Agent —— 多平台采集 / 本地清洗 / 自动化分析 / 看板与预警"
 requires-python = ">=3.10"

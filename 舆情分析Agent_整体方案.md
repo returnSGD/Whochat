@@ -725,7 +725,7 @@ def daily_report(): ...
 ## 10. 项目目录结构
 
 ```
-E:\Wochat\
+E:\Whochat\
 ├── 舆情分析Agent_整体方案.md          # 本文档
 ├── README.md
 ├── pyproject.toml

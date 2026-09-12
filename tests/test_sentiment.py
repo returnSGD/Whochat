@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from wochat.analysis.sentiment import LexiconSentiment
+from Whochat.analysis.sentiment import LexiconSentiment
 
 
 @pytest.fixture(scope="module")

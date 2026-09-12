@@ -20,8 +20,8 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from datetime import timedelta  # noqa: E402
 
-from wochat.pipeline.runner import Pipeline  # noqa: E402
-from wochat.store.models import utcnow  # noqa: E402
+from Whochat.pipeline.runner import Pipeline  # noqa: E402
+from Whochat.store.models import utcnow  # noqa: E402
 
 NEG = "发热严重，售后也联系不上，太失望了"
 POS = "物流很快，包装完好，客服态度也不错"
@@ -59,7 +59,7 @@ def _seed(repo):
     )
 
 
-DASHBOARD = Path(__file__).resolve().parents[1] / "src" / "wochat" / "web" / "app.py"
+DASHBOARD = Path(__file__).resolve().parents[1] / "src" / "Whochat" / "web" / "app.py"
 
 
 def test_dashboard_renders_all_tabs_without_exception(repo):

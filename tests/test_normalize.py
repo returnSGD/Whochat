@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from wochat.crawler.normalize import (
+from Whochat.crawler.normalize import (
     normalize_comment,
     normalize_content,
     parse_bool,

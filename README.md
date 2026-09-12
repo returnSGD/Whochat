@@ -1,4 +1,4 @@
-# Wochat —— 舆情分析 Agent
+# Whochat —— 舆情分析 Agent
 
 本地部署的舆情分析工具链：**多平台采集 → 本地清洗去重 → 情感/主题分析 → 看板 + 企微预警**。
 
@@ -14,13 +14,13 @@ pip install sqlalchemy streamlit datasketch json-repair
 pip install -e .
 
 # 1. 环境自检 —— 一次把"什么能跑、什么没装"说清楚
-python -m wochat.cli init
+python -m Whochat.cli init
 
 # 2. 零依赖跑通全链路（不需要爬虫、不需要模型）
-python -m wochat.cli demo
+python -m Whochat.cli demo
 
 # 3. 可视化（双入口：看板端 / 操作端）
-python -m wochat.cli dashboard          # → http://localhost:6666
+python -m Whochat.cli dashboard          # → http://localhost:6666
 #   /dashboard  看板端 —— 只读：趋势/情感/主题/词云/传播/预警记录
 #   /console    操作端 —— 可写：L1~L5 触发与微调（采集/分析/规则/推送）
 
@@ -40,23 +40,23 @@ python -m pytest -q
 
 ```bash
 # 采集（首次需扫码登录，浏览器会弹出）
-python -m wochat.cli crawl --platform xhs --keyword "你的品牌"
-python -m wochat.cli crawl --platform douyin --keyword "你的品牌"
+python -m Whochat.cli crawl --platform xhs --keyword "你的品牌"
+python -m Whochat.cli crawl --platform douyin --keyword "你的品牌"
 
 # 或者导入已有的 JSONL/JSON/CSV
-python -m wochat.cli import path/to/comments.jsonl --platform xhs
+python -m Whochat.cli import path/to/comments.jsonl --platform xhs
 
 # 分析 → 主题 → 词云
-python -m wochat.cli analyze
-python -m wochat.cli topics              # 需要 bertopic
-python -m wochat.cli wordcloud
+python -m Whochat.cli analyze
+python -m Whochat.cli topics              # 需要 bertopic
+python -m Whochat.cli wordcloud
 
 # 预警
-python -m wochat.cli alert --seed-rules
-python -m wochat.cli alert --since-hours 24   # 回放模式：补数/复盘用
+python -m Whochat.cli alert --seed-rules
+python -m Whochat.cli alert --since-hours 24   # 回放模式：补数/复盘用
 
 # 看看数据
-python -m wochat.cli status
+python -m Whochat.cli status
 ```
 
 支持平台：`douyin` `xhs` `kuaishou` `bilibili` `weibo` `tieba` `zhihu`
@@ -129,7 +129,7 @@ L5 预警   聚合·分级·冷却      L6 看板  FastAPI/Streamlit :6666
 自建标注集（`tests/annotated_sample.json`，33 条）：
 
 ```bash
-python -m wochat.cli evaluate tests/annotated_sample.json
+python -m Whochat.cli evaluate tests/annotated_sample.json
 ```
 
 **词典后端准确率 90.9%**（对比：子串扫描改造前是 69.7%）。
@@ -145,7 +145,7 @@ python -m wochat.cli evaluate tests/annotated_sample.json
 
 ### ⚠️ Transformer 后端目前**不如**词典后端
 
-实测（同一 33 条标注集）把 `WOCHAT_SENTIMENT_BACKEND` 切成 `transformer`：
+实测（同一 33 条标注集）把 `WHOCHAT_SENTIMENT_BACKEND` 切成 `transformer`：
 
 | 后端 | 准确率 | 说明 |
 |---|---|---|
@@ -194,7 +194,7 @@ positive  [+0.928, +0.999]
 ## 目录
 
 ```
-src/wochat/
+src/Whochat/
 ├── config.py              配置（代理/采集/模型/情感/预警/存储）
 ├── cli.py                 命令行入口
 ├── console.py             控制台编码兼容（GBK 下 emoji 降级不崩）
@@ -252,16 +252,21 @@ cp .env.example .env   # 按需修改
 ```bash
 git clone https://github.com/NanmiCoder/MediaCrawler.git vendor/MediaCrawler
 # 再按它的 README 装依赖（Playwright + 浏览器），必要时在 .env 里指定解释器：
-# WOCHAT_MC_PYTHON=C:\path\to\mediacrawler\venv\Scripts\python.exe
+# WHOCHAT_MC_PYTHON=C:\path\to\mediacrawler\venv\Scripts\python.exe
 ```
 
 > 本仓库的代码对 MediaCrawler **只做子进程调用 + 读它产出的 JSONL**，
-> 没有修改它的源码。想验证整条链路而不装爬虫，直接用 `python -m wochat.cli demo`。
+> 没有修改它的源码。想验证整条链路而不装爬虫，直接用 `python -m Whochat.cli demo`。
 
 ### 命名说明
 
-仓库名叫 `Whochat`，项目内部（Python 包、模块、命令）统一是 `wochat`：
+仓库、Python 包、命令、环境变量前缀**统一是 `Whochat`**（此前内部包名误拼成
+`wochat`，少了一个 `h`，已全量更正）：
 
 ```bash
-python -m wochat.cli demo
+python -m Whochat.cli demo
 ```
+
+> 改名影响三处：包目录 `src/Whochat/`、命令 `python -m Whochat.cli ...`、
+> 环境变量前缀 `WHOCHAT_*`（旧的 `.env` 需同步改名）。本地默认库文件也从
+> `data/db/wochat.db` 变为 `data/db/Whochat.db`。

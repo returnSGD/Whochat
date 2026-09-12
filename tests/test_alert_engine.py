@@ -10,8 +10,8 @@ from datetime import timedelta
 
 import pytest
 
-from wochat.alert.rules_engine import RuleEngine, seed_default_rules
-from wochat.store.models import utcnow
+from Whochat.alert.rules_engine import RuleEngine, seed_default_rules
+from Whochat.store.models import utcnow
 
 
 def _comment(cid: str, text: str, *, hours_ago: float = 0.0, platform: str = "xhs") -> dict:
@@ -52,7 +52,7 @@ class TestSensitiveWordRule:
 
     def test_sensitive_words_are_live_from_dict_file(self, engine, repo):
         """词表是在评估时读取的，改文件立刻生效，不需要重新 seed 规则。"""
-        from wochat.pipeline.rules import sensitive_words
+        from Whochat.pipeline.rules import sensitive_words
 
         assert len(sensitive_words()) > 0, "dicts/sensitive_words.txt 应当存在且非空"
 

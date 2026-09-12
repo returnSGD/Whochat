@@ -7,7 +7,7 @@
 #    它们在中性语境里出现频率极高，收进来会把中性评论大批误判成正面。
 #
 # 改完这份表务必重跑基线回归：
-#     python -m wochat.cli evaluate tests/annotated_sample.json
+#     python -m Whochat.cli evaluate tests/annotated_sample.json
 # 准确率掉了就说明收错了词。
 
 # --- 强正面评价 ---

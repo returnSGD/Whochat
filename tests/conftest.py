@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from wochat.config import settings
+from Whochat.config import settings
 
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     """指向临时 SQLite 的全新 Repository。"""
-    import wochat.store.repository as R
+    import Whochat.store.repository as R
 
     monkeypatch.setattr(R, "_engine", None)
     monkeypatch.setattr(R, "_SessionFactory", None)

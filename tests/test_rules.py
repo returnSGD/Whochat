@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from wochat.pipeline.rules import clean, count_matches, is_meaningful, is_spam, tokenize
+from Whochat.pipeline.rules import clean, count_matches, is_meaningful, is_spam, tokenize
 
 
 class TestClean:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from wochat.pipeline.dedup import dedupe, exact_dedupe, minhash_dedupe, text_fingerprint
+from Whochat.pipeline.dedup import dedupe, exact_dedupe, minhash_dedupe, text_fingerprint
 
 
 class TestExactDedupe:

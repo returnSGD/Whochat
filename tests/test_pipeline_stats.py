@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-from wochat.pipeline.runner import Pipeline
-from wochat.store.models import utcnow
+from Whochat.pipeline.runner import Pipeline
+from Whochat.store.models import utcnow
 
 DUP = "这个产品真的很好用，强烈推荐购买"
 NEG = "发热严重，售后也联系不上，太失望了"

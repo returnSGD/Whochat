@@ -1,6 +1,6 @@
 """人工导入的测试。
 
-README 里演示的就是 `wochat import xxx.jsonl --platform xhs`（不带 --keyword），
+README 里演示的就是 `Whochat import xxx.jsonl --platform xhs`（不带 --keyword），
 所以这条路径必须有回归保护 —— 它曾经在数据已落库之后崩掉。
 """
 
@@ -12,9 +12,9 @@ import json
 
 import pytest
 
-from wochat.crawler.base import CrawlTask
-from wochat.crawler.manual_source import ManualImportSource
-from wochat.pipeline.runner import Pipeline
+from Whochat.crawler.base import CrawlTask
+from Whochat.crawler.manual_source import ManualImportSource
+from Whochat.pipeline.runner import Pipeline
 
 
 def _crawl(path, platform="xhs", keyword=None):
@@ -93,7 +93,7 @@ class TestDumpRaw:
     def test_import_without_keyword_does_not_crash(self, repo, tmp_path):
         """回归：README 的用法不带 --keyword，task.target 为 None，
         旧代码迭代 None 直接 TypeError，导入在数据落库后崩掉。"""
-        from wochat.crawler.manual_source import register_manual
+        from Whochat.crawler.manual_source import register_manual
 
         p = tmp_path / "d.jsonl"
         p.write_text(
