@@ -46,8 +46,81 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _env_bool_or_none(name: str) -> bool | None:
-    """三态布尔：没设返回 None，用于「显式开关优先，否则自动判断」。"""
-    return None if os.getenv(name) is None else _env_bool(name)
+    """三态布尔：没设返回 None，用于「显式开关优先，否则自动判断」。
+
+    ⚠️ **空字符串必须当成"没设"**，不能当成显式 False。
+
+    这一点很要命：`.env.example` 里写的是 `WHOCHAT_LLM_ENABLED=`（留空，
+    方便用户填）。若把空值判成 False，那么每一个从 `.env.example` 复制配置的
+    人，即使把 URL 和 api_key 都填好了，LLM 也永远是关的 —— 而界面上不会有
+    任何异常，只会安静地不生效。这正好把「只填两个值就能用」的承诺废掉。
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    return _env_bool(name)
+
+
+ENV_PATH = ROOT / ".env"
+
+
+def update_env(updates: dict[str, str]) -> Path:
+    """把配置写进 `.env`，并让**当前进程立即生效**。
+
+    为什么要有这个函数：操作端（`/console`）的定位是"可写"，却在 LLM 配置上
+    只显示一句"去 .env 里填两个值" —— 让用户去手改文件，这和页面定位自相矛盾。
+
+    为什么写 `.env` 而不是另起一套存储：它是本项目唯一的配置来源
+    （`load_dotenv` 在模块导入时读它），而且已在 `.gitignore` 里。
+
+    ⚠️ 改完必须手动同步 `os.environ`：`Settings` 是**导入时的快照**，
+    不刷新的话"保存成功但测试连接仍失败"，表现得像保存没生效。
+    """
+    from dotenv import set_key
+
+    ENV_PATH.touch(exist_ok=True)
+    for key, value in updates.items():
+        # quote_mode="never"：值本身不含空格/井号时不需要引号，写出来更可读
+        set_key(str(ENV_PATH), key, value, quote_mode="never")
+        os.environ[key] = value
+    return ENV_PATH
+
+
+def save_llm_settings(base_url: str, api_key: str | None, model: str) -> Path:
+    """保存 LLM 配置。返回写入的文件路径。
+
+    `api_key=None` 表示"不改动"（页面上留空 = 沿用已保存的），
+    这是必要的：密钥不该回显到页面上，所以输入框永远是空的，
+    无法用"空字符串"区分"没填"和"想清空"。
+    """
+    llm = settings.llm
+    llm.base_url = base_url.strip()
+    llm.model = model.strip()
+    if api_key is not None:
+        llm.api_key = api_key.strip()
+
+    updates = {
+        "WHOCHAT_LLM_BASE_URL": llm.base_url,
+        "WHOCHAT_LLM_MODEL": llm.model,
+        # 把开关写成显式 true：在页面上填地址和密钥这个动作，本身就表示
+        # "我要用 LLM"。不写的话，若 `.env` 里原本是 `false`（或留空但被旧版
+        # 判成 false），就会出现"界面里配好了、重启后又变回关的"这种
+        # 最难排查的不一致。
+        "WHOCHAT_LLM_ENABLED": "true",
+    }
+    if api_key is not None:
+        updates["WHOCHAT_LLM_API_KEY"] = llm.api_key
+    llm.enabled = True
+    return update_env(updates)
+
+
+def mask_secret(value: str) -> str:
+    """把密钥显示成 `sk-1***abcd` 这种形态，用于界面回显。"""
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}***{value[-4:]}"
 
 
 DATA_DIR = _abs_from_root(os.getenv("WHOCHAT_DATA_DIR") or ROOT / "data")

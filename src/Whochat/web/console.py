@@ -98,6 +98,86 @@ def status_strip() -> None:
 # ================================================================ L1 采集
 
 
+def _llm_config_panel() -> None:
+    """L2 里的 LLM 配置面板 —— 直接填，不用去手改 .env。
+
+    配置写进 `.env`（项目唯一的配置来源，且已在 .gitignore 里），
+    同时刷新当前进程，所以"保存并测试"能立即生效，不必重启看板。
+    """
+    from Whochat.config import mask_secret, save_llm_settings
+
+    st.markdown("#### LLM 分析（可选）")
+    cfg = settings.llm
+
+    if cfg.configured:
+        state = "已开启" if cfg.is_enabled else "已配置但被关闭"
+        st.caption(
+            f"当前：**{state}** · 接口 `{cfg.base_url}` · "
+            f"密钥 `{mask_secret(cfg.api_key)}` · 模型 `{cfg.model or '自动选择'}`"
+        )
+    else:
+        st.caption(
+            "当前：**未配置** —— 填下面两项就能用。任何 OpenAI 兼容接口都行"
+            "（DeepSeek / 通义 / Moonshot / 智谱 / OpenAI / 本地 Ollama 的 `/v1`）。"
+        )
+
+    with st.form("llm_config_form"):
+        base_url = st.text_input(
+            "请求地址 base_url",
+            value=cfg.base_url,
+            placeholder="https://api.deepseek.com/v1",
+            help="只写到域名也行（https://api.deepseek.com），会自动探测 /v1",
+        )
+        # 密钥永远不回显：value 固定为空，留空即"不修改"
+        api_key = st.text_input(
+            "API Key",
+            value="",
+            type="password",
+            placeholder=(
+                f"已保存 {mask_secret(cfg.api_key)}，留空则不修改"
+                if cfg.api_key
+                else "sk-xxxxxxxx"
+            ),
+        )
+        model = st.text_input(
+            "模型名（可留空）",
+            value=cfg.model,
+            placeholder="留空 = 自动从 /models 里挑一个对话模型",
+        )
+
+        c1, c2, _ = st.columns([1, 1, 2])
+        do_save = c1.form_submit_button("保存", type="primary")
+        do_test = c2.form_submit_button("保存并测试连接")
+
+    if not (do_save or do_test):
+        return
+
+    if not base_url.strip():
+        st.error("请求地址不能为空。")
+        return
+    if not api_key.strip() and not cfg.api_key:
+        st.error("首次配置需要填 API Key。")
+        return
+
+    path = save_llm_settings(
+        base_url, api_key if api_key.strip() else None, model
+    )
+    st.success(f"已写入 `{path}`（该文件在 .gitignore 里，不会进版本库）")
+
+    if do_test:
+        from Whochat.pipeline.llm_client import LLMClient
+
+        with st.spinner("正在请求…（首次会自动探测端点与模型）"):
+            ok, msg = LLMClient().available()
+        (st.success if ok else st.error)(msg)
+        if not ok:
+            st.caption(
+                "排查顺序：① 地址是否含正确的路径（多数服务端在 `/v1` 下）"
+                "② key 是否有权限 ③ 访问境外接口需要代理，"
+                "在本机设 `HTTPS_PROXY=http://127.0.0.1:7897` 后重启看板。"
+            )
+
+
 def tab_crawl() -> None:
     st.markdown("### L1 采集")
     st.warning(
@@ -211,23 +291,7 @@ def tab_clean() -> None:
         f"近重复去重：{'MinHash/LSH' if has_minhash else 'SimHash 回退（未装 datasketch）'}"
     )
 
-    st.markdown("#### LLM 分析")
-    cfg = settings.llm
-    if not cfg.configured:
-        st.info(
-            "未配置 LLM（可选）。在 `.env` 里填 **只两个值** 即可启用：\n\n"
-            "```\nWHOCHAT_LLM_BASE_URL=https://api.deepseek.com/v1\n"
-            "WHOCHAT_LLM_API_KEY=sk-xxxxxxxx\n```\n"
-            "模型名可留空，会自动挑一个对话模型。"
-        )
-    else:
-        st.caption(f"接口：`{cfg.base_url}` · 模型：`{cfg.model or '自动选择'}`")
-        if st.button("测试连接", key="llm_ping"):
-            from Whochat.pipeline.llm_client import LLMClient
-
-            with st.spinner("正在请求…"):
-                ok, msg = LLMClient().available()
-            (st.success if ok else st.error)(msg)
+    _llm_config_panel()
 
     st.divider()
     st.markdown("#### 规则试跑")

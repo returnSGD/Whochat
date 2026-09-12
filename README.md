@@ -24,7 +24,7 @@ python -m Whochat.cli dashboard          # → http://localhost:8501
 #   /           看板端 —— 只读：趋势/情感/主题/词云/传播/预警记录（默认页）
 #   /console    操作端 —— 可写：L1~L5 触发与微调（采集/分析/规则/推送）
 
-# 4. 回归测试（278 个用例，约 64 秒）
+# 4. 回归测试（308 个用例，约 60 秒）
 python -m pytest -q
 ```
 
@@ -123,6 +123,14 @@ LLM 分析    : 就绪 · 模型 deepseek-chat（自动选择（候选 42 个）
 
 > ⚠️ 访问境外 API（OpenAI 等）需要代理：设 `HTTPS_PROXY=http://127.0.0.1:7897`。
 > 采集流量与它是分开的，不会互相影响（见 §2.3 的代理分工）。
+
+### 也可以直接在页面上填
+
+不想改文件的话，打开操作端 **http://127.0.0.1:8501/console** → **L2 清洗** →
+「LLM 分析」，有三个输入框（地址 / 密钥 / 模型名），填完点「保存并测试连接」即可。
+配置会写进 `.env`（已在 `.gitignore` 里），并**立即生效，不用重启看板**。
+
+> 密钥框是 password 类型且永不回显，已保存时显示成 `sk-a***wxyz` 的掩码。
 
 > ⚠️ **本机想跑本地模型的话**：RTX 3060 Laptop 只有 **6GB 显存**，
 > Qwen2.5-14B q4 约 9GB **装不下**。要用 7B q4（~4.7GB，勉强）或 3B/4B。
@@ -285,7 +293,7 @@ src/Whochat/
 dicts/                     停用词 / 敏感词 / 情感词 / jieba 自定义词典
 data/                      SQLite、原始 JSONL、导出物、LLM 字段映射缓存
 vendor/MediaCrawler/       采集基座（git clone，未修改）
-tests/                     pytest 用例（278 个）+ 情感标注集
+tests/                     pytest 用例（308 个）+ 情感标注集
 ```
 
 词典分工（`dicts/`）：
