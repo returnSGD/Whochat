@@ -9,7 +9,7 @@
 
 启动：
     python -m Whochat.cli dashboard      # → http://localhost:8501
-    # 直接打开某个入口：/dashboard 或 /console
+    # 直接打开某个入口：/ （看板端）或 /console （操作端）
 """
 
 from __future__ import annotations
@@ -31,9 +31,19 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.navigation(
+navigator = st.navigation(
     [
-        st.Page("dashboard.py", title="看板端", icon="📊", url_path="dashboard", default=True),
-        st.Page("console.py", title="操作端", icon="🎛️", url_path="console"),
+        # ⚠️ 这里**不要**写 url_path。Streamlit 规定「默认页的 url_path 恒为空字符串
+        # （即根路径 /）」，`Page.url_path` 的实现就是 `"" if self._default else ...`，
+        # 传进来的值会被**静默忽略** —— 不报错、不警告。
+        #
+        # 写了 url_path="dashboard" 的后果：看板端实际注册在 `/`，而 `/dashboard`
+        # 这条路由根本不存在。用户访问 /dashboard 会看到 "Page not found ...
+        # Running the app's main page."，再被回退到主页面（恰好就是看板端自己），
+        # 表现为"报错后又刷新出来"。而 curl 该路径仍返回 200（SPA 任何路径都发
+        # 同一个外壳），所以 HTTP 200 从来证明不了这条路由存在。
+        st.Page("dashboard.py", title="看板端", icon="📊", default=True),  # → /
+        st.Page("console.py", title="操作端", icon="🎛️", url_path="console"),  # → /console
     ]
-).run()
+)
+navigator.run()

@@ -21,10 +21,10 @@ python -m Whochat.cli demo
 
 # 3. 可视化（双入口：看板端 / 操作端）
 python -m Whochat.cli dashboard          # → http://localhost:8501
-#   /dashboard  看板端 —— 只读：趋势/情感/主题/词云/传播/预警记录
+#   /           看板端 —— 只读：趋势/情感/主题/词云/传播/预警记录（默认页）
 #   /console    操作端 —— 可写：L1~L5 触发与微调（采集/分析/规则/推送）
 
-# 4. 回归测试（187 个用例，约 20 秒）
+# 4. 回归测试（192 个用例，约 22 秒）
 python -m pytest -q
 ```
 
@@ -32,6 +32,13 @@ python -m pytest -q
 > 浏览器会在建连前直接拒绝，报"无法访问此页面"；而 `curl` / `requests`
 > 不检查这份清单，服务端一切正常 —— 于是 HTTP 200 会给人"页面没问题"的错觉。
 > 默认端口是 8501，改端口用 `--port` 或 `WHOCHAT_DASHBOARD_PORT`。
+
+> ⚠️ **看板端在根路径 `/`，不是 `/dashboard`**。Streamlit 规定默认页的
+> `url_path` 恒为空字符串，给它传 `url_path` 会被**静默忽略**（不报错）。
+> 因此 `/dashboard` 是一条不存在的路由：访问它会先报 "Page not found"，
+> 再回退到默认页（恰好就是看板端），表现为"报错一下又刷新出来"。
+> 注意 `curl /dashboard` 仍返回 200 —— SPA 任何路径都发同一个外壳，
+> **HTTP 200 证明不了路由存在**。
 
 `demo` 能跑通，说明整条业务链路是好的。之后逐步换成真实数据源。
 

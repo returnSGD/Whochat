@@ -589,6 +589,8 @@ web/app.py        入口（st.navigation）
 - 测试 **182 → 183**：新增 `tests/test_console.py`（操作端 5 个分层 tab +
   规则编辑器渲染无异常）；看板端 AppTest 在 `st.navigation` 下仍为 6 tab。
 - 真实服务：`/`、`/dashboard`、`/console` 三个路由均 HTTP 200，启动日志无异常。
+  > 更正（§十五）：`/dashboard` **不是**有效路由，当时的 200 是 SPA 外壳的假象。
+  > 本次声称的"三路由"实为两条：`/` 与 `/console`。
 - `tests/test_dashboard.py` 无需改动 —— 默认页仍是看板端，6 tab 断言继续成立。
 
 ---
@@ -616,7 +618,7 @@ web/app.py        入口（st.navigation）
 
 验证：`pytest -q` 183 passed / 2 xfailed；`init` / `status` 正常且读到的仍是
 原有数据（60 内容 / 1928 评论 / 1164 分析）；`WHOCHAT_DATA_DIR` 隔离 demo 退出 0；
-`/`、`/dashboard`、`/console` 三路由 HTTP 200。
+`/`、`/dashboard`、`/console` 三路由 HTTP 200（其中 `/dashboard` 的 200 是假象，见 §十五）。
 
 > ⚠️ 破坏性提示：若你在别处有 `.env` 或外部脚本，`WOCHAT_*` 环境变量名和
 > `python -m wochat.cli` 命令都需要一起改。
@@ -663,8 +665,95 @@ Chrome / Edge / Firefox 都内置一份**受限端口清单**，6666 在列
 ### 14.3 验证
 
 - `python -m Whochat.cli dashboard`（不带 `--port`）默认起在 8501，
-  `netstat` 显示监听，`/dashboard` `/console` 均 `curl` 200
+  `netstat` 显示监听，`/` `/console` 均 `curl` 200
+  （当时也测了 `/dashboard` 并拿到 200，但那是假象，见 §十五）
 - 8501 不在浏览器禁用端口清单内 —— 这是本次修复的依据
 - `pytest -q` **187 passed / 2 xfailed**（183 → 187，新增 4 条），无回归
+
+---
+
+## 十五、`/dashboard` 是一条不存在的路由（2026-09-12）
+
+紧接着 §十四，端口修好后第一次真正用浏览器访问。访问
+`http://127.0.0.1:8501/dashboard` 看到：
+
+```
+Page not found
+The page that you have requested does not seem to exist.
+Running the app's main page.
+```
+
+然后页面自己"刷新"出来。**这次是代码 bug，不是 Streamlit 的怪癖。**
+
+### 15.1 原因：`url_path` 与 `default=True` 不能并存
+
+`web/app.py` 原来这么写：
+
+```python
+st.Page("dashboard.py", title="看板端", icon="📊", url_path="dashboard", default=True)
+```
+
+Streamlit 的规定是 **默认页的 `url_path` 恒为空字符串**，实现就一行
+（`streamlit/navigation/page.py:428`）：
+
+```python
+return "" if self._default else self._url_path
+```
+
+官方文档的措辞是 "If you set `default=True`, `url_path` is ignored."
+—— **静默忽略，不报错、不警告**。
+
+实测 `.url_path` 拿到的是 `''`，不是 `'dashboard'`。于是看板端实际注册在 `/`，
+`/dashboard` 这条路由压根不存在。访问它 → 前端匹配不到任何 page → 弹
+"Page not found" → 回退到主页面 → 而主页面**恰好就是看板端自己** →
+表现为"报错一下又刷新出来了"。看板端是默认页，所以它总能兜住，看起来像自动恢复。
+
+注册路由实测（`AppTest._registered_pages`）：修复前后都是 `{'', 'console'}` ——
+**集合从来没变过**，这恰恰说明问题：写的人以为注册了 `/dashboard`，实际没有。
+
+### 15.2 与 §十四 是同一类错误
+
+两轮踩的是同一个坑：**"服务端 200" 不等于 "这个地址真的能打开"**。
+
+| | §十四 | §十五 |
+|---|---|---|
+| 现象 | "无法访问此页面" | "Page not found" 后自动恢复 |
+| 假证据 | `curl :6666` 返回 200 | `curl /dashboard` 返回 200 |
+| 真原因 | 6666 是浏览器禁用端口 | `/dashboard` 从未被注册 |
+| 为什么 200 骗人 | curl 不查禁用端口清单 | SPA 任何路径都返回同一个外壳 |
+
+所以 §12.3 / §13 里"`/`、`/dashboard`、`/console` 三路由均 HTTP 200"这句
+**从写下的那一刻就是错的** —— 当时并没有三条路由，只有两条。已在原处标注更正。
+
+### 15.3 改动
+
+| 位置 | 变更 |
+|---|---|
+| `web/app.py` | 去掉被忽略的 `url_path="dashboard"`，加注释说明为何不能写 |
+| `web/app.py` | `st.navigation(...).run()` 拆成 `navigator.run()`，便于加注释 |
+| `tests/test_web_routes.py` | **新增**（5 条）：AST 检查 + 实跑 AppTest 核对注册路由 |
+| README | `/dashboard` → `/`，并写明这个坑 |
+| WORKLOG | §12.3 / §13 / §14.3 三处 200 声称就地更正 |
+
+对外承诺的入口现在只有两个，且都真实存在：**`/`（看板端）** 和 **`/console`（操作端）**。
+
+### 15.4 回归测试为什么这么写
+
+关键教训：**「注册路由集合」这个断言在修复前也会通过**（集合一直是
+`{'', 'console'}`）。所以钉住它没用。真正要钉的是那个**静默失效的组合**：
+
+- `test_default_page_does_not_pass_url_path` —— 用 AST 检查 app.py，
+  禁止同一个 `st.Page` 同时出现 `url_path` 与 `default`
+- `TestRegisteredRoutes` —— 实跑一遍，确认注册路由与文档承诺一致
+  （防的是反向情况：将来真加了页面却没更新文档）
+
+已实测验证：把旧写法注入回去，AST 那条**立刻失败**并打印出问题调用，
+其余 4 条仍通过 —— 与上面的分析一致。
+
+### 15.5 验证
+
+- `pytest -q` **192 passed / 2 xfailed**（187 → 192，新增 5 条），无回归
+- 注册路由实测为 `{'', 'console'}`，与 README 承诺一致
+- ⚠️ 仍需本人在浏览器里确认 `/` 与 `/console` 均能正常打开、图表渲染正确
 - ⚠️ **图表渲染仍待本人用浏览器过目** —— 端口通了不等于图画对了
 
