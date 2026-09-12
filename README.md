@@ -7,6 +7,8 @@
 
 [在线介绍页](https://whochatting.pages.dev/) · [设计方案](舆情分析Agent_整体方案.md) · [GitHub](https://github.com/returnSGD/Whochat)
 
+介绍链接：https://whochatting.pages.dev/
+
 `Python 3.10+` · `7 个平台` · `6 层链路` · `324 个测试` · `词典法情感 90.9%`
 
 ---
