@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Whochat —— 本地部署的舆情分析 Agent</title>
+<meta name="description" content="Whochat：多平台采集 → 本地清洗去重 → 情感/主题分析 → 看板 + 企微预警。本地部署、隐私优先、可复现。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+<style>
+  :root{
+    --bg:#ffffff;
+    --bg-soft:#f7f9fc;
+    --surface:#ffffff;
+    --surface-2:#f2f5fa;
+    --border:#e5e9f0;
+    --border-strong:#d3dae6;
+    --ink:#0f172a;
+    --ink-2:#4a5a72;
+    --muted:#8b98ab;
+    --accent:#2563eb;
+    --accent-soft:#eff4ff;
+    --accent-line:#c7d9ff;
+    --good:#15803d;
+    --good-soft:#f0fdf4;
+    --warn:#b45309;
+    --warn-soft:#fff8ed;
+    --warn-line:#fde3bd;
+    --radius:14px;
+    --radius-sm:10px;
+    --maxw:1120px;
+    --shadow-sm:0 1px 2px rgba(15,23,42,.05);
+    --shadow-md:0 8px 24px -10px rgba(15,23,42,.14);
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font-family:var(--sans);font-size:16px;line-height:1.75;
+    -webkit-font-smoothing:antialiased;overflow-x:hidden;
+  }
+  a{color:inherit;text-decoration:none}
+  h1,h2,h3,h4{line-height:1.3;margin:0;font-weight:700;letter-spacing:-.015em}
+  p{margin:0}
+  code{font-family:var(--mono);font-size:.87em}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+
+  /* ---------- nav ---------- */
+  header.nav{
+    position:sticky;top:0;z-index:50;
+    background:rgba(255,255,255,.86);
+    backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--border);
+  }
+  .nav-inner{display:flex;align-items:center;gap:28px;height:68px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-.02em}
+  .brand .dot{
+    width:28px;height:28px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:15px;
+    background:var(--accent-soft);border:1px solid var(--accent-line);
+  }
+  .nav-links{display:flex;align-items:center;gap:26px;margin-left:auto;font-size:14.5px;color:var(--ink-2)}
+  .nav-links a{transition:color .18s}
+  .nav-links a:hover{color:var(--accent)}
+  .gh-btn{
+    display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border-radius:999px;
+    font-size:14px;font-weight:600;border:1px solid var(--border-strong);
+    background:#fff;color:var(--ink);transition:.18s;white-space:nowrap;box-shadow:var(--shadow-sm);
+  }
+  .gh-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+  .gh-btn svg{width:16px;height:16px;fill:currentColor}
+
+  /* ---------- hero ---------- */
+  .hero{
+    padding:92px 0 72px;text-align:center;
+    background:linear-gradient(180deg,#f7faff 0%,#ffffff 62%);
+    border-bottom:1px solid var(--border);
+  }
+  .pill{
+    display:inline-flex;align-items:center;gap:9px;padding:6px 15px;border-radius:999px;
+    font-size:13.5px;color:var(--ink-2);background:#fff;border:1px solid var(--border-strong);
+    margin-bottom:26px;box-shadow:var(--shadow-sm);
+  }
+  .pulse{width:7px;height:7px;border-radius:50%;background:var(--good);animation:pulse 2.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(21,128,61,.35)}70%{box-shadow:0 0 0 9px rgba(21,128,61,0)}100%{box-shadow:0 0 0 0 rgba(21,128,61,0)}}
+  h1.title{font-size:clamp(40px,6.4vw,68px);letter-spacing:-.035em;line-height:1.12;color:var(--ink)}
+  h1.title .grad{color:var(--accent)}
+  .hero .sub{font-size:clamp(18px,2.3vw,23px);color:var(--ink);margin-top:18px;font-weight:600}
+  .hero .desc{max-width:660px;margin:16px auto 0;color:var(--ink-2);font-size:16.5px}
+  .hero-cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:34px}
+  .btn{
+    display:inline-flex;align-items:center;gap:9px;padding:12px 24px;border-radius:11px;
+    font-weight:600;font-size:15.5px;transition:.18s;border:1px solid transparent;cursor:pointer;
+  }
+  .btn svg{width:17px;height:17px}
+  .btn-primary{background:var(--accent);color:#fff;box-shadow:0 6px 18px -8px rgba(37,99,235,.7)}
+  .btn-primary:hover{background:#1d4ed8;transform:translateY(-1px);box-shadow:0 10px 24px -8px rgba(37,99,235,.75)}
+  .btn-ghost{background:#fff;border-color:var(--border-strong);color:var(--ink);box-shadow:var(--shadow-sm)}
+  .btn-ghost:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);transform:translateY(-1px)}
+
+  /* ---------- terminal ---------- */
+  .terminal{
+    max-width:740px;margin:56px auto 0;text-align:left;background:#fff;
+    border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow-md);
+  }
+  .term-bar{display:flex;align-items:center;gap:7px;padding:11px 16px;border-bottom:1px solid var(--border);background:var(--bg-soft)}
+  .term-bar i{width:10px;height:10px;border-radius:50%;display:block;background:#dbe2ec}
+  .term-bar i:nth-child(1){background:#fca5a5}.term-bar i:nth-child(2){background:#fcd34d}.term-bar i:nth-child(3){background:#86efac}
+  .term-bar span{margin-left:auto;font-size:12px;color:var(--muted);font-family:var(--mono)}
+  .term-body{padding:20px 24px;font-family:var(--mono);font-size:13.6px;line-height:2.05;overflow-x:auto;color:var(--ink-2);background:#fff}
+  .term-body .c{color:var(--muted)}
+  .term-body .p{color:var(--accent);font-weight:600}
+  .term-body .ok{color:var(--good)}
+  .cursor{display:inline-block;width:7px;height:15px;background:var(--accent);vertical-align:-3px;animation:blink 1.15s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  /* ---------- stats ---------- */
+  .stats{
+    display:grid;grid-template-columns:repeat(4,1fr);gap:1px;margin:64px auto 0;max-width:920px;
+    background:var(--border);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;
+  }
+  .stat{background:#fff;padding:24px 20px;text-align:center}
+  .stat b{display:block;font-size:clamp(25px,3.6vw,34px);letter-spacing:-.03em;color:var(--ink);font-weight:800}
+  .stat small{display:block;color:var(--muted);font-size:13px;margin-top:4px}
+
+  /* ---------- sections ---------- */
+  section{padding:84px 0}
+  section.soft{background:var(--bg-soft);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+  .sec-head{max-width:720px;margin-bottom:44px}
+  .sec-tag{font-size:12.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+  .sec-head h2{font-size:clamp(27px,3.8vw,38px);letter-spacing:-.028em}
+  .sec-head p{color:var(--ink-2);margin-top:14px;font-size:16.5px}
+
+  /* ---------- pipeline ---------- */
+  .pipe{display:flex;flex-direction:column}
+  .layer{
+    display:grid;grid-template-columns:132px 1fr;gap:24px;align-items:center;
+    padding:20px 24px;background:#fff;border:1px solid var(--border);
+    margin-top:-1px;transition:.18s;position:relative;
+  }
+  .layer:first-child{border-radius:var(--radius) var(--radius) 0 0}
+  .layer:last-child{border-radius:0 0 var(--radius) var(--radius)}
+  .layer:hover{background:var(--accent-soft);border-color:var(--accent-line);z-index:2}
+  .layer .lid{display:flex;align-items:center;gap:11px;font-weight:700;font-size:16.5px;white-space:nowrap}
+  .layer .lid em{
+    font-style:normal;width:30px;height:30px;border-radius:8px;flex:none;display:grid;place-items:center;
+    font-size:12px;font-family:var(--mono);font-weight:700;
+    background:var(--accent-soft);border:1px solid var(--accent-line);color:var(--accent);
+  }
+  .layer .lbody{color:var(--ink-2);font-size:14.5px}
+  .layer .lbody b{color:var(--ink);font-weight:600}
+  .layer .lbody code{background:var(--surface-2);padding:2px 7px;border-radius:6px;color:var(--accent);border:1px solid var(--border)}
+
+  /* ---------- cards ---------- */
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px}
+  .card{
+    background:#fff;border:1px solid var(--border);border-radius:var(--radius);
+    padding:26px 24px;transition:.18s;
+  }
+  .card:hover{transform:translateY(-3px);border-color:var(--accent-line);box-shadow:var(--shadow-md)}
+  .card .ic{
+    width:42px;height:42px;border-radius:11px;display:grid;place-items:center;font-size:20px;
+    background:var(--accent-soft);border:1px solid var(--accent-line);margin-bottom:15px;
+  }
+  .card h3{font-size:17px;margin-bottom:8px}
+  .card p{color:var(--ink-2);font-size:14.5px}
+  .card p code{background:var(--surface-2);padding:1px 6px;border-radius:5px;color:var(--accent);border:1px solid var(--border)}
+
+  /* ---------- table ---------- */
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);background:#fff;box-shadow:var(--shadow-sm)}
+  table{border-collapse:collapse;width:100%;min-width:620px;font-size:14.5px}
+  th,td{padding:14px 20px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+  th{font-weight:700;color:var(--ink);background:var(--bg-soft);font-size:13.5px}
+  td{color:var(--ink-2)}
+  tr:last-child td{border-bottom:none}
+  td strong{color:var(--ink);font-weight:600}
+  td code{background:var(--surface-2);padding:1px 6px;border-radius:5px;color:var(--accent);border:1px solid var(--border)}
+  .no{color:var(--muted);font-size:13.5px}
+  .tick{color:var(--good);font-weight:700}
+  .cross{color:var(--muted);font-weight:700}
+
+  /* ---------- decisions ---------- */
+  .decisions{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:16px}
+  .decision{display:flex;gap:15px;padding:20px 22px;background:#fff;border:1px solid var(--border);border-radius:var(--radius-sm);transition:.18s}
+  .decision:hover{border-color:var(--accent-line);box-shadow:var(--shadow-sm)}
+  .decision .n{
+    font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--accent);flex:none;
+    width:30px;height:30px;border-radius:8px;display:grid;place-items:center;
+    background:var(--accent-soft);border:1px solid var(--accent-line);
+  }
+  .decision h4{font-size:15.5px;margin-bottom:6px}
+  .decision p{color:var(--ink-2);font-size:14px}
+  .decision code{background:var(--surface-2);padding:1px 6px;border-radius:5px;color:var(--accent);border:1px solid var(--border)}
+
+  /* ---------- code block ---------- */
+  .code-block{position:relative}
+  pre.code{
+    background:#fbfcfe;border:1px solid var(--border);border-radius:var(--radius);
+    padding:22px 24px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.95;
+    color:var(--ink-2);margin:0;box-shadow:var(--shadow-sm);
+  }
+  pre.code .c{color:var(--muted)}
+  pre.code .k{color:#7c3aed}
+  pre.code .s{color:#0f766e}
+  pre.code .p{color:var(--accent);font-weight:600}
+  .copy{
+    position:absolute;top:12px;right:12px;padding:6px 12px;border-radius:8px;font-size:12px;
+    background:#fff;border:1px solid var(--border-strong);color:var(--ink-2);cursor:pointer;
+    font-family:var(--sans);transition:.18s;box-shadow:var(--shadow-sm);
+  }
+  .copy:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+
+  /* ---------- limits ---------- */
+  .limits{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+  .limit{
+    display:flex;gap:13px;padding:18px 20px;border-radius:var(--radius-sm);
+    background:var(--warn-soft);border:1px solid var(--warn-line);
+  }
+  .limit .ic{color:var(--warn);font-size:15px;flex:none;line-height:1.6}
+  .limit p{font-size:14px;color:var(--ink-2)}
+  .limit b{color:var(--ink);font-weight:600}
+  .limit code{background:#fff;padding:1px 6px;border-radius:5px;color:var(--warn);border:1px solid var(--warn-line)}
+
+  /* ---------- quote ---------- */
+  .quote{
+    border-left:3px solid var(--accent);background:var(--accent-soft);
+    padding:18px 22px;border-radius:0 var(--radius-sm) var(--radius-sm) 0;
+    color:var(--ink-2);font-size:15px;
+  }
+  .quote b{color:var(--ink)}
+  .quote code{background:#fff;padding:1px 6px;border-radius:5px;color:var(--accent);border:1px solid var(--accent-line)}
+
+  /* ---------- footer ---------- */
+  footer{background:var(--bg-soft);border-top:1px solid var(--border);padding:52px 0 40px}
+  .foot-inner{display:flex;align-items:center;justify-content:space-between;gap:24px;flex-wrap:wrap}
+  .foot-brand{display:flex;align-items:center;gap:12px}
+  .foot-brand .dot{width:36px;height:36px;border-radius:10px;background:var(--accent-soft);border:1px solid var(--accent-line);display:grid;place-items:center;font-size:17px}
+  .foot-brand div b{display:block;font-size:15.5px}
+  .foot-brand div small{color:var(--muted);font-size:13px}
+  .foot-links{display:flex;gap:22px;font-size:14px;color:var(--ink-2);flex-wrap:wrap}
+  .foot-links a:hover{color:var(--accent)}
+  .copyright{text-align:center;color:var(--muted);font-size:13px;margin-top:34px;padding-top:22px;border-top:1px solid var(--border)}
+  .copyright a{color:var(--accent)}
+
+  /* ---------- reveal ---------- */
+  .reveal{opacity:0;transform:translateY(18px);transition:opacity .65s cubic-bezier(.2,.7,.3,1),transform .65s cubic-bezier(.2,.7,.3,1)}
+  .reveal.in{opacity:1;transform:none}
+
+  @media(max-width:820px){
+    .nav-links{display:none}
+    .stats{grid-template-columns:repeat(2,1fr)}
+    .layer{grid-template-columns:1fr;gap:7px}
+    .hero{padding:60px 0 48px}
+    section{padding:60px 0}
+    .nav-inner{height:62px}
+  }
+  @media(prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important}
+    .reveal{opacity:1;transform:none}
+    html{scroll-behavior:auto}
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ NAV ============ -->
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top"><span class="dot">📡</span>Whochat</a>
+    <nav class="nav-links">
+      <a href="#pipeline">链路</a>
+      <a href="#features">能力</a>
+      <a href="#llm">LLM 分析</a>
+      <a href="#decisions">设计决策</a>
+      <a href="#start">快速开始</a>
+      <a href="#limits">已知限制</a>
+      <a class="gh-btn" href="https://github.com/returnSGD/Whochat" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ============ HERO ============ -->
+<section class="hero">
+  <div class="wrap">
+    <span class="pill"><span class="pulse"></span>本地部署 · 数据不出内网 · 隐私优先</span>
+    <h1 class="title">把评论区的声音<br><span class="grad">变成可行动的预警</span></h1>
+    <p class="sub">Whochat —— 舆情分析 Agent</p>
+    <p class="desc">
+      一条完整的本地工具链：<strong>多平台采集 → 本地清洗去重 → 情感 / 主题分析 → 看板 + 企微预警</strong>。
+      零依赖即可跑通全链路，LLM 可选接入，用不用模型由你决定。
+    </p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="https://github.com/returnSGD/Whochat" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        查看源码
+      </a>
+      <a class="btn btn-ghost" href="#start">快速开始 →</a>
+    </div>
+
+    <div class="terminal reveal">
+      <div class="term-bar"><i></i><i></i><i></i><span>bash — Whochat</span></div>
+      <div class="term-body">
+<span class="c"># 零依赖跑通全链路（不需要爬虫、不需要模型）</span><br>
+<span class="p">$</span> python -m Whochat.cli demo<br>
+<span class="ok">✓</span> 造数 · 清洗 · 去重 · 情感 · 预警 —— 全链路通过<br>
+<br>
+<span class="c"># 打开看板（双入口）</span><br>
+<span class="p">$</span> python -m Whochat.cli dashboard<br>
+<span class="ok">✓</span> 看板端 /console · http://localhost:8501<span class="cursor"></span>
+      </div>
+    </div>
+
+    <div class="stats reveal">
+      <div class="stat"><b>7</b><small>支持平台</small></div>
+      <div class="stat"><b>6</b><small>层处理链路 L1–L6</small></div>
+      <div class="stat"><b>308</b><small>回归测试用例</small></div>
+      <div class="stat"><b>90.9%</b><small>情感基线准确率</small></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PIPELINE ============ -->
+<section id="pipeline">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-tag">Architecture</div>
+      <h2>六层链路，一条数据流走到底</h2>
+      <p>每层职责单一、接口清晰。采集层与分析层之间只有 <code>CrawlerSource</code> 协议一个解耦点，换数据源不动下游。</p>
+    </div>
+
+    <div class="pipe reveal">
+      <div class="layer">
+        <div class="lid"><em>L1</em>采集</div>
+        <div class="lbody"><b>MediaCrawler(Playwright)</b> · MockSource · ManualImport<br>抖音 / 小红书 / 快手 / B站 / 微博 / 贴吧 / 知乎 —— 只取评论区文本，但<b>抓全字段</b></div>
+      </div>
+      <div class="layer">
+        <div class="lid"><em>L2</em>清洗</div>
+        <div class="lbody">规则清洗 → 精确去重(SHA256) → 近重复(MinHash/SimHash 分桶) → <b>LLM 打标（可选）</b></div>
+      </div>
+      <div class="layer">
+        <div class="lid"><em>L3</em>分析</div>
+        <div class="lbody"><b>快通道</b> 规则引擎（秒级 · 无模型）　│　<b>慢通道</b> 情感分析 · BERTopic · 词云 · 时序</div>
+      </div>
+      <div class="layer">
+        <div class="lid"><em>L4</em>存储</div>
+        <div class="lbody"><code>Repository</code> 统一读写接口 —— 上层不碰 SQL，这层就是事实上的「中台」边界</div>
+      </div>
+      <div class="layer">
+        <div class="lid"><em>L5</em>预警</div>
+        <div class="lbody">聚合 · 分级 · 冷却 → <b>企业微信机器人</b>；失败保持 pending 自动重试，<b>不丢警</b></div>
+      </div>
+      <div class="layer">
+        <div class="lid"><em>L6</em>看板</div>
+        <div class="lbody">Streamlit <code>:8501</code> 双入口 —— <b>看板端</b>（只读：趋势/情感/主题/词云/传播/预警记录）+ <b>操作端</b>（L1~L5 触发与微调）</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FEATURES ============ -->
+<section id="features" class="soft">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-tag">Capabilities</div>
+      <h2>不只是一条爬虫加一个词云</h2>
+      <p>从「抓到数据」到「知道该做什么」，中间每一步都有对应的工程决策。</p>
+    </div>
+
+    <div class="cards">
+      <div class="card reveal">
+        <div class="ic">🕷️</div>
+        <h3>多平台采集</h3>
+        <p>基于 MediaCrawler 的浏览器自动化，零逆向、不随平台加密更新失效。采集层抓全字段 —— 采集不可逆，分析可重跑。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic">🧹</div>
+        <h3>精确 + 近重复去重</h3>
+        <p>SHA256 精确去重，叠加 MinHash / SimHash 分桶处理改字、加表情的搬运内容，避免同一波声量被重复计数。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic">💬</div>
+        <h3>词典法情感分析</h3>
+        <p>子串扫描 + 否定 + 程度 + 转折。实测 90.9%，比同标注集上的 transformer（60.6%）更准，且零依赖、毫秒级、可复现。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic">🧭</div>
+        <h3>主题建模 + 离线兜底</h3>
+        <p>BERTopic 中文嵌入；HuggingFace 不可达时自动降级到 TF-IDF + SVD + HDBSCAN 的<b>零下载离线方案</b>，功能不报废。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic">🌊</div>
+        <h3>传播分析</h3>
+        <p>传播曲线（起爆点 / 峰值 / 增速拐点）+ 传播路径（<code>parent_content_id</code> 还原转发链 DOT 图），看清事情怎么扩散的。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic">🚨</div>
+        <h3>快慢双通道预警</h3>
+        <p>秒级规则快通道先发警，不等模型清洗；慢通道补深度分析。等模型跑完再告警，时效性已经没了。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic">🏷️</div>
+        <h3>LLM 打标（可选）</h3>
+        <p>广告识别看<b>意图</b>不看关键词、主体识别、关键词抽取、主题命名。只填 base_url + api_key，任何 OpenAI 兼容接口都能用。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic">📊</div>
+        <h3>双入口看板</h3>
+        <p>看板端只读、操作端可写。采集 / 分析 / 规则 / 推送都能在页面上触发和微调，不用记命令行。</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic">🔐</div>
+        <h3>本地优先</h3>
+        <p>SQLite 落库、本地清洗、本地分析。数据不出内网；LLM 是否启用、走哪个端点，完全由你决定。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LLM ============ -->
+<section id="llm">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-tag">Optional LLM</div>
+      <h2>LLM 只做它擅长的，不做它不擅长的</h2>
+      <p>开不开模型是两套结果：开启后写入 <code>lexicon-v1-llm</code>，与 <code>lexicon-v1</code> <b>并存不覆盖</b>，事后能对比差异。</p>
+    </div>
+
+    <div class="tbl-wrap reveal">
+      <table>
+        <thead><tr><th style="width:50%">✅ 用 LLM 做</th><th>❌ 不用 LLM 做</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="tick">✓</span> <strong>广告识别</strong> —— 判意图而非关键词<br><span class="no">「商家刷单太明显了」是在批评，纯正则会误杀</span></td>
+            <td><span class="cross">✕</span> <strong>情感判定</strong> —— 永远走词典法<br><span class="no">实测 90.9% vs 模型 60.6%，封闭分类任务更快更准更可复现</span></td>
+          </tr>
+          <tr>
+            <td><span class="tick">✓</span> <strong>主体识别</strong> —— 这条在骂哪个产品 / 型号<br><span class="no">写入 <code>subject</code> 字段，规则完全做不到</span></td>
+            <td><span class="cross">✕</span> <strong>声量统计</strong> —— 必须是精确计数<br><span class="no">概率性输出不能用来数数</span></td>
+          </tr>
+          <tr>
+            <td><span class="tick">✓</span> <strong>关键词抽取 / 主题命名</strong><br><span class="no">把「发热 / 续航 / 掉电」归纳成「屏幕发热与续航」</span></td>
+            <td><span class="cross">✕</span> <strong>快通道预警</strong> —— 秒级链路<br><span class="no">设计前提就是「无模型、秒级」</span></td>
+          </tr>
+          <tr>
+            <td><span class="tick">✓</span> <strong>字段映射</strong>（<code>import --llm-map</code>）<br><span class="no">字段名陌生的数据集，学一次就能导入并落盘缓存</span></td>
+            <td><span class="cross">✕</span> <strong>逐条判情感</strong><br><span class="no">拿大炮打蚊子，还更不准</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="quote reveal" style="margin-top:22px">
+      <b>漏项不丢数据：</b>模型少返回几条时，那几条会继续被正常分析，只是不带 LLM 标签。
+      丢数据比少打一个标严重得多 —— 这条有测试钉死。
+    </div>
+  </div>
+</section>
+
+<!-- ============ DECISIONS ============ -->
+<section id="decisions" class="soft">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-tag">Design Decisions</div>
+      <h2>十条踩坑之后定下来的决策</h2>
+      <p>改之前建议先看方案文档 §13。这里挑几条最能说明「为什么长这样」的。</p>
+    </div>
+
+    <div class="decisions">
+      <div class="decision reveal"><div class="n">01</div><div><h4>采集不自研，用 MediaCrawler</h4><p>抖音 <code>a_bogus</code> 是 JSVMP 混淆 + 环境检测 + 数月一升级；浏览器自动化零逆向，且不随加密更新失效。</p></div></div>
+      <div class="decision reveal"><div class="n">02</div><div><h4>国内平台采集不走代理</h4><p>代理 IP 特征反而触发风控，出口地域跳变与登录态冲突。代理只用于下载依赖。</p></div></div>
+      <div class="decision reveal"><div class="n">03</div><div><h4>只取评论区文本</h4><p>评论区是情绪最集中处，信噪比高于视频正文。</p></div></div>
+      <div class="decision reveal"><div class="n">04</div><div><h4>采集层抓全字段</h4><p>采集不可逆，分析可重跑。<code>parent_content_id</code> / <code>follower_count</code> 内容一删就补不回来。</p></div></div>
+      <div class="decision reveal"><div class="n">05</div><div><h4>LLM 只打标，不判情感</h4><p>情感是封闭分类任务，词典法更快更准更可复现。用 LLM 逐条判是拿大炮打蚊子。</p></div></div>
+      <div class="decision reveal"><div class="n">06</div><div><h4>预警走快慢双通道</h4><p>等模型清洗完再告警，时效性已丧失（行业标准 30 秒 ~ 分钟级）。</p></div></div>
+      <div class="decision reveal"><div class="n">07</div><div><h4>不建真「数据中台」</h4><p>单人本地工具，过度工程化是最大死因。但保留存储 / 展示边界。</p></div></div>
+      <div class="decision reveal"><div class="n">08</div><div><h4>编排用 APScheduler，不用 Airflow</h4><p>Windows 本机开发，Airflow 需要 WSL / Docker 且过重。</p></div></div>
+      <div class="decision reveal"><div class="n">09</div><div><h4>MVP 用 Streamlit，二期换 FastAPI</h4><p>先抢时间验证，再演进架构。</p></div></div>
+      <div class="decision reveal"><div class="n">10</div><div><h4>看板措辞限定「讨论区」</h4><p>评论区样本天然偏向极端情绪，不可外推为「公众意见」。</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ QUICK START ============ -->
+<section id="start">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-tag">Quick Start</div>
+      <h2>三分钟跑起来</h2>
+      <p>demo 是幂等的：固定种子造数，连跑多次落库量与告警数都不变 —— 所以它也能当回归基线用。</p>
+    </div>
+
+    <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(400px,1fr))">
+      <div class="code-block reveal">
+        <button class="copy" data-copy="pip install -e .&#10;python -m Whochat.cli init      # 环境自检：什么能跑、什么没装&#10;python -m Whochat.cli demo      # 零依赖跑通全链路&#10;python -m Whochat.cli dashboard # 看板 → http://localhost:8501">复制</button>
+        <pre class="code"><span class="c"># 1. 安装（可编辑模式）</span>
+<span class="p">$</span> pip install -e .
+
+<span class="c"># 2. 环境自检 —— 一次说清「什么能跑、什么没装」</span>
+<span class="p">$</span> python -m Whochat.cli init
+
+<span class="c"># 3. 零依赖跑通全链路（不需要爬虫 / 模型）</span>
+<span class="p">$</span> python -m Whochat.cli demo
+
+<span class="c"># 4. 可视化：看板端 + 操作端</span>
+<span class="p">$</span> python -m Whochat.cli dashboard
+  <span class="c">→ http://localhost:8501</span></pre>
+      </div>
+
+      <div class="code-block reveal">
+        <button class="copy" data-copy="python -m Whochat.cli crawl --platform xhs --keyword &quot;你的品牌&quot;&#10;python -m Whochat.cli crawl --platform douyin --keyword &quot;你的品牌&quot;&#10;python -m Whochat.cli import path/to/comments.jsonl --platform xhs&#10;python -m Whochat.cli analyze&#10;python -m Whochat.cli topics&#10;python -m Whochat.cli wordcloud&#10;python -m Whochat.cli alert --seed-rules&#10;python -m Whochat.cli status">复制</button>
+        <pre class="code"><span class="c"># 换真实数据源</span>
+<span class="p">$</span> python -m Whochat.cli crawl --platform xhs --keyword <span class="s">"你的品牌"</span>
+<span class="p">$</span> python -m Whochat.cli crawl --platform douyin --keyword <span class="s">"你的品牌"</span>
+
+<span class="c"># 或导入已有的 JSONL / JSON / CSV</span>
+<span class="p">$</span> python -m Whochat.cli import comments.jsonl --platform xhs
+
+<span class="c"># 分析 → 主题 → 词云</span>
+<span class="p">$</span> python -m Whochat.cli analyze
+<span class="p">$</span> python -m Whochat.cli topics
+<span class="p">$</span> python -m Whochat.cli wordcloud
+
+<span class="c"># 预警（--since-hours 24 可回放补数 / 复盘）</span>
+<span class="p">$</span> python -m Whochat.cli alert --seed-rules
+<span class="p">$</span> python -m Whochat.cli status</pre>
+      </div>
+    </div>
+
+    <div class="code-block reveal" style="margin-top:18px">
+      <button class="copy" data-copy="WHOCHAT_LLM_BASE_URL=https://api.deepseek.com/v1&#10;WHOCHAT_LLM_API_KEY=sk-xxxxxxxxxxxxxxxx">复制</button>
+      <pre class="code"><span class="c"># 可选：接入任意 OpenAI 兼容接口（不装额外包，直接走 HTTP）。模型名可留空，会自动挑一个对话模型。</span>
+<span class="k">WHOCHAT_LLM_BASE_URL</span>=https://api.deepseek.com/v1
+<span class="k">WHOCHAT_LLM_API_KEY</span>=sk-xxxxxxxxxxxxxxxx</pre>
+    </div>
+
+    <div class="quote reveal" style="margin-top:22px">
+      不想改文件？打开操作端 <b>http://127.0.0.1:8501/console</b> → <b>L2 清洗</b> → 「LLM 分析」，
+      三个输入框填完点「保存并测试连接」，写进 <code>.env</code> 并立即生效，不用重启看板。
+    </div>
+  </div>
+</section>
+
+<!-- ============ LIMITS ============ -->
+<section id="limits" class="soft">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-tag">Honest Limits</div>
+      <h2>已知限制（诚实清单）</h2>
+      <p>一个工具好不好用，取决于它有没有把边界说清楚。以下是它<b>做不到</b>或<b>做不好</b>的地方。</p>
+    </div>
+
+    <div class="limits">
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>MediaCrawler 是 NON-COMMERCIAL 许可</b>，明确禁止商业用途。要商业交付必须实现 <code>OfficialAPISource</code> 替换它 —— 这正是协议层存在的意义。</p></div>
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>采集成功率 70~90%</b>。403 / 滑块 / 登录态失效是常态，这是健康水平，不是 bug。</p></div>
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>反讽识别基本无解</b>。「这手机真好用，用了三天就送修了」规则法处理不了，需要模型或上下文。</p></div>
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>评论区样本天然偏斜</b>，只代表「愿意评论的人」，情绪偏极端，不可外推为公众意见。</p></div>
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>主题建模需 ≥ 100 文档</b>，小样本会退化成一堆碎片主题；文档数 &lt; 20 时直接拒绝并说明原因。</p></div>
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>HuggingFace 可达性不稳定</b>，嵌入模型下载会失败。此时自动降级到零下载离线方案，效果弱于 BERTopic 但功能不报废。</p></div>
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>LLM 输出是概率性的</b>，同一条文本两次调用可能给不同标签。所以它只做可容忍抖动的打标，不参与情感判定与声量统计。</p></div>
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>LLM 打标未在真实数据上评估过</b>。现有测试验证的是契约（不漏项、不错位、不丢数据），不是准确率 —— 请用自己的标注集来测。</p></div>
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>情感基线样本量小</b>。33 条标注集证明的是链路可用，不是「准确率有 90.9%」。请务必用业务数据建 300~500 条重测。</p></div>
+      <div class="limit reveal"><span class="ic">⚠</span><p><b>字段映射可能学错</b>。已有防护（只认 schema 内字段、别名优先），但学错仍会往库里写错数据；缓存可查看 / 删除重学。</p></div>
+    </div>
+
+    <div class="quote reveal" style="margin-top:26px">
+      <b>没有基线，后面所有的情感统计、预警阈值、主题分析都建立在流沙上。</b>
+      —— 这是项目文档里反复强调的一句话。
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="wrap">
+    <div class="foot-inner">
+      <div class="foot-brand">
+        <span class="dot">📡</span>
+        <div><b>Whochat</b><small>舆情分析 Agent · 本地部署 · v0.1.0</small></div>
+      </div>
+      <div class="foot-links">
+        <a href="https://github.com/returnSGD/Whochat" target="_blank" rel="noopener">GitHub 仓库</a>
+        <a href="https://github.com/returnSGD/Whochat#readme" target="_blank" rel="noopener">README</a>
+        <a href="https://github.com/returnSGD/Whochat/issues" target="_blank" rel="noopener">Issues</a>
+        <a href="#start">快速开始</a>
+      </div>
+    </div>
+    <div class="copyright">
+      Whochat · 本地部署的舆情分析工具链 —— 多平台采集 / 本地清洗 / 自动化分析 / 看板与预警<br>
+      <a href="https://github.com/returnSGD/Whochat" target="_blank" rel="noopener">github.com/returnSGD/Whochat</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
+  }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('.reveal').forEach((el, i) => {
+    el.style.transitionDelay = (Math.min(i, 6) * 40) + 'ms';
+    io.observe(el);
+  });
+
+  document.querySelectorAll('.copy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const text = btn.dataset.copy.replace(/&#10;/g, '\n').replace(/&quot;/g, '"');
+      try {
+        await navigator.clipboard.writeText(text);
+        const old = btn.textContent;
+        btn.textContent = '已复制 ✓';
+        setTimeout(() => btn.textContent = old, 1600);
+      } catch (_) {
+        btn.textContent = '复制失败';
+        setTimeout(() => btn.textContent = '复制', 1600);
+      }
+    });
+  });
+</script>
+</body>
+</html>
