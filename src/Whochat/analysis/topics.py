@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from Whochat.config import EXPORT_DIR
+from Whochat.pipeline.llm_client import align_by_index
 from Whochat.pipeline.rules import stopwords, tokenize
 
 
@@ -278,6 +279,82 @@ def _offline_topics(docs: list[str], min_topic_size: int, top_k_keywords: int) -
         return TopicResult(False, message=f"离线方案依赖缺失: {e}（需要 scikit-learn）")
     except Exception as e:
         return TopicResult(False, message=f"离线主题建模失败: {type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------- LLM 命名
+
+NAME_SYSTEM_PROMPT = """你在帮分析师给舆情主题命名。用户会给出若干个聚类主题，
+每个主题带关键词和几条代表评论。
+
+规则：
+1. 只输出 JSON，不要任何解释或 markdown 代码块标记。
+2. 每个主题给一个 **6~14 字**的中文名称，要具体说清"在讨论什么事"，
+   例如「售后维修进度慢」「屏幕发热与续航」。
+3. 不要用「其他」「杂项」「主题一」这类没有信息量的名称。
+4. 不要照抄关键词列表，要归纳成一句人话。
+5. 每个序号都必须给出名称，一条都不能少。"""
+
+
+def build_name_prompt(infos: list[TopicInfo]) -> str:
+    blocks = []
+    for i, t in enumerate(infos):
+        kw = "、".join(t.keywords[:10])
+        reps = "\n".join(f"    - {d[:100]}" for d in t.rep_docs[:3])
+        blocks.append(
+            f"[{i}] 关键词：{kw}\n  共 {t.doc_count} 条讨论"
+            + (f"\n  代表评论：\n{reps}" if reps else "")
+        )
+    return (
+        f"请给下面 {len(infos)} 个主题命名。\n"
+        '返回 JSON：{"labels": [{"i": 0, "name": "名称"}, ...]}\n\n'
+        + "\n\n".join(blocks)
+    )
+
+
+def name_topics(
+    result: TopicResult, client=None
+) -> tuple[bool, str]:
+    """用 LLM 给主题起名，**就地**替换 `TopicInfo.label`。
+
+    关键词仍保留在 `TopicInfo.keywords` 里，所以替换 label 不丢信息 ——
+    原来的"关键词拼标签"随时能重新拼出来。
+
+    失败时保留原标签（不清空、不置 None）：主题名难看总好过看板上一片空白。
+    """
+    if not result.ok or not result.topics:
+        return False, "没有主题可命名"
+
+    if client is None:
+        from Whochat.pipeline.llm_client import get_client
+
+        client = get_client()
+    if client is None:
+        return False, "未配置 LLM"
+
+    infos = result.topics
+    data, note = client.chat_json(NAME_SYSTEM_PROMPT, build_name_prompt(infos))
+    if data is None:
+        return False, f"调用失败: {note}"
+
+    items = data.get("labels")
+    if not isinstance(items, list):
+        return False, f"响应缺少 labels: {str(data)[:160]}"
+
+    named = 0
+    # 对齐逻辑与 llm_clean 共用（见 align_by_index 文档）—— 逐条回退会在中途
+    # 撞车，把已对齐的主题名覆盖掉
+    for item, local in zip(items, align_by_index(items, len(infos))):
+        if local is None:
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            infos[local].label = name[:256]
+            named += 1
+
+    if not named:
+        return False, "模型没有给出任何有效名称"
+
+    return True, f"已命名 {named}/{len(infos)} 个主题"
 
 
 def aggregate_by_content(repo, version: str, keyword: str | None = None) -> tuple[list[str], list[str]]:

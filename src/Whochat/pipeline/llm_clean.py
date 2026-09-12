@@ -1,30 +1,44 @@
-"""本地模型清洗 —— 结构化打标。
+"""LLM 结构化打标 —— 广告识别 / 主体识别 / 关键词抽取。
 
-**职责边界（重要，方案文档 §3.3）**：
-LLM 只做「清洗 + 打标」：判断是不是广告、提取主体、抽关键词。
-**不做最终情感判定** —— 那是封闭分类任务，小模型更快更准。
+**职责边界（重要，方案文档 §3.3 / ADR#5）**：
+LLM 只做「清洗 + 打标」：判断是不是广告、这条在讨论谁、抽关键词。
+**不做最终情感判定** —— 那是封闭分类任务，小模型/词典法更快更准更可复现。
+（实测佐证：transformer 情感后端在同一标注集上 60.6%，词典法 90.9%。）
 
-后端：Ollama + Qwen2.5。选 Qwen 的原因是其 **JSON 可靠性被评为 Excellent**
-（专为结构化输出训练）；7B 只是 Good，更小的模型在复杂 schema 下经常出非法语法。
+## 为什么这块该用 LLM
 
-结构化输出的可靠性阶梯（从高到低）：
-    文法约束解码（Outlines/vLLM）> 原生 Function Calling > JSON Mode > 纯提示词
-    ⚠️ Outlines 不支持 Ollama，所以 Ollama 路线用 Instructor 做校验重试。
+规则法在这三个任务上都有硬天花板：
+- **广告识别**：`rules.py::is_spam` 是关键词正则，第三轮就出过误杀 ——
+  「商家刷单太明显了，太失望了」是本该被分析的**负面舆情**，却因为含
+  "刷单"被当广告永久排除出情感统计。这是语义判断，正则做不了。
+- **主体识别**：「这条在骂哪个产品/型号」规则完全无能为力，
+  `analysis_results.subject` 字段建了表就一直空着。
+- **关键词**：jieba + TF-IDF 抽的是高频词，不是"这条在说什么"。
 
-**优雅降级**：Ollama 没装/没启动/模型没拉，不抛异常，直接返回 None，
-调用方跳过 LLM 环节继续跑。整条链路不能因为一个可选组件挂掉。
+## 批量是省钱的关键
+
+一次请求处理 K 条，比逐条请求省 K 倍的钱和往返。但批量会引入**漏项风险**：
+模型可能少返回几条，或者把序号搞乱。所以这里按序号对齐，**缺项一律回落到
+"未经 LLM 处理"而不是丢弃** —— 丢数据比少打一个标严重得多。
+
+## 优雅降级
+
+任何失败都不抛异常：Ollama 没起、API key 错、网络不通、返回不是 JSON ——
+全部返回 `CleanResult(error=...)`，调用方跳过 LLM 环节继续跑。
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from Whochat.config import settings
+from Whochat.pipeline.llm_client import LLMClient, align_by_index, get_client
 from Whochat.pipeline.rules import is_spam
 
-# ---------------------------------------------------------------- Schema
+# 单条文本给模型的长度上限。评论文本一般很短，设这个是为了防
+# 某条异常长的文本把整个批次的上下文撑爆（会连带整批失败）。
+MAX_TEXT_CHARS = 1000
 
 SYSTEM_PROMPT = """你是一个中文社交媒体文本清洗助手。你的任务是把用户给出的评论文本，
 转换成结构化 JSON 数据。
@@ -35,16 +49,10 @@ SYSTEM_PROMPT = """你是一个中文社交媒体文本清洗助手。你的任�
 3. `subject` 是这条评论在讨论的对象（品牌/产品/型号/人物/事件），没有则填 null。
 4. `keywords` 是 1~5 个最能代表这条评论的名词，不要包含停用词和标点。
 5. 拿不准时 `sentiment_hint` 填 neutral，不要瞎猜。
-6. 不要输出思考过程。"""
-
-JSON_SCHEMA_HINT = """请严格按以下 JSON 结构输出：
-{
-  "is_ad": false,
-  "is_valid": true,
-  "subject": "讨论对象或null",
-  "sentiment_hint": "positive|neutral|negative",
-  "keywords": ["词1", "词2"]
-}"""
+6. 判断 `is_ad` 要看**意图**而不是关键词：用户在抱怨"商家刷单太明显了"
+   是在**批评**刷单行为，不是广告，`is_ad` 应为 false。
+7. 必须为输入里的每一个序号都输出一条结果，一条都不能少。
+8. 不要输出思考过程。"""
 
 
 @dataclass
@@ -56,149 +64,160 @@ class CleanResult:
     keywords: list[str] = field(default_factory=list)
     raw_output: str | None = None
     error: str | None = None
+    # True 表示这条真的经过了模型；False 表示回落（跳过/漏项/失败）
+    from_llm: bool = False
 
 
-# ---------------------------------------------------------------- 客户端
+def _single_schema() -> str:
+    return """{
+  "i": 序号(整数),
+  "is_ad": false,
+  "is_valid": true,
+  "subject": "讨论对象或null",
+  "sentiment_hint": "positive|neutral|negative",
+  "keywords": ["词1", "词2"]
+}"""
 
 
-def _resolve_model(configured: str, names: set[str]) -> str | None:
-    """从已安装模型名里解析出真正可用的 tag。
-
-    先要求精确 tag 匹配；没有时才退到同族（同 base）模型。
-    绝不返回未安装的 tag —— 否则 clean() 会调用一个不存在的模型，
-    异常又被兜底吞掉，表现为「模型不可用但 available() 说 True」。
-    """
-    if configured in names:
-        return configured
-    base = configured.split(":")[0]
-    # 同族仅认 "base" 或 "base:tag"，避免 qwen2.5 误匹配 qwen2.5-coder
-    family = sorted(n for n in names if n == base or n.startswith(base + ":"))
-    return family[0] if family else None
+def build_user_prompt(texts: list[str]) -> str:
+    """拼批量请求。带序号是为了让模型输出能和输入对齐。"""
+    body = "\n".join(
+        f"[{i}] {t[:MAX_TEXT_CHARS]}" for i, t in enumerate(texts)
+    )
+    return (
+        f"请处理下面 {len(texts)} 条文本，逐条输出。\n"
+        f'返回 JSON：{{"results": [ ... ]}}，其中每一项形如：\n{_single_schema()}\n\n'
+        f"待处理文本：\n{body}"
+    )
 
 
 class LLMCleaner:
-    """Ollama 本地模型清洗器。
+    """基于 OpenAI 兼容接口的结构化打标器。
 
     用法：
         cleaner = LLMCleaner()
-        if cleaner.available():
-            result = cleaner.clean("这个手机发热严重")
+        if cleaner.available()[0]:
+            results = cleaner.clean_batch(["这个手机发热严重", ...])
     """
 
-    def __init__(self, model: str | None = None, base_url: str | None = None):
-        self.model = model or settings.llm.model
-        self.base_url = base_url or settings.llm.base_url
-        self._client = None
-        # available() 解析出的已安装模型名；clean() 必须用它，而不是配置里的 tag
-        self._resolved_model: str | None = None
+    def __init__(self, client: LLMClient | None = None):
+        self.client = client or LLMClient()
+
+    @property
+    def model(self) -> str:
+        return self.client._resolved_model or self.client.model or ""
 
     # -------------------------------------------------- 可用性
 
     def available(self) -> tuple[bool, str]:
-        """检查 Ollama 服务和模型是否就绪。返回 (可用, 说明)。"""
-        if not settings.llm.enabled:
-            return False, "LLM 清洗未启用（.env 里设 WHOCHAT_LLM_ENABLED=true 开启）"
+        return self.client.available()
 
-        try:
-            import ollama  # noqa: F401
-        except ImportError:
-            return False, "未安装 ollama 包，执行: pip install -e .[llm]"
-
-        try:
-            import ollama
-
-            client = ollama.Client(host=self.base_url)
-            models = client.list()
-            names = {
-                m.get("model") or m.get("name", "")
-                for m in (models.get("models") or [])
-            }
-            resolved = _resolve_model(self.model, names)
-            if resolved is None:
-                return False, (
-                    f"Ollama 中未找到模型 {self.model}。\n"
-                    f"  已安装: {sorted(names) or '无'}\n"
-                    f"  拉取: ollama pull {self.model}"
-                )
-            # 后续 clean() 用真正存在的 tag，否则每次都调用缺失模型、异常被静默吞掉
-            self._resolved_model = resolved
-            return True, "ok"
-        except Exception as e:
-            return False, f"连接 Ollama 失败 ({self.base_url}): {e}"
-
-    # -------------------------------------------------- 清洗
+    # -------------------------------------------------- 单条
 
     def clean(self, text: str) -> CleanResult:
-        """清洗单条文本。任何异常都吞掉并记录，不向上抛。"""
-        if not text or not text.strip():
-            return CleanResult(is_valid=False, error="empty")
+        """清洗单条。保留这个入口是为了单条试跑/测试方便。"""
+        return self.clean_batch([text], verbose=False)[0]
 
-        # 先用便宜规则过滤掉明显垃圾，避免浪费模型调用
-        if is_spam(text):
-            return CleanResult(is_ad=True, is_valid=False, keywords=[])
+    # -------------------------------------------------- 批量
 
-        try:
-            import ollama
+    def clean_batch(
+        self, texts: list[str], batch_size: int | None = None, verbose: bool = True
+    ) -> list[CleanResult]:
+        """批量打标。返回的列表与输入**等长且顺序一致**。
 
-            if self._client is None:
-                self._client = ollama.Client(host=self.base_url)
+        这是本模块最重要的契约：调用方按 `zip(comments, results)` 消费结果，
+        长度对不上就会错位 —— 把 A 的标签贴到 B 身上，且完全静默。
+        """
+        size = max(1, batch_size or settings.llm.batch_size)
 
-            resp = self._client.chat(
-                # 用 available() 解析出的真实 tag；未解析时退回配置值
-                model=self._resolved_model or self.model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"{JSON_SCHEMA_HINT}\n\n文本：{text}"},
-                ],
-                format="json",  # Ollama 的 JSON Mode：保证合法 JSON
-                options={
-                    # 清洗是确定性任务，温度必须为 0
-                    "temperature": settings.llm.temperature,
-                    "top_p": 1.0,
-                    "seed": 42,
-                },
-            )
-            raw = resp["message"]["content"]
-            return self._parse(raw)
+        results: list[CleanResult] = [CleanResult(error="未处理") for _ in texts]
 
-        except Exception as e:
-            return CleanResult(error=f"{type(e).__name__}: {e}")
+        # 先用便宜的规则挡掉明显垃圾，剩下的才值得花 token
+        pending: list[int] = []
+        for i, t in enumerate(texts):
+            if not t or not t.strip():
+                results[i] = CleanResult(is_valid=False, error="empty")
+            elif is_spam(t):
+                results[i] = CleanResult(is_ad=True, is_valid=False)
+            else:
+                pending.append(i)
 
-    def clean_batch(self, texts: list[str], verbose: bool = True) -> list[CleanResult]:
-        results = []
-        for i, t in enumerate(texts, 1):
-            results.append(self.clean(t))
-            if verbose and i % 50 == 0:
-                print(f"[llm_clean] {i}/{len(texts)}")
+        done = 0
+        reported = 0
+        for start in range(0, len(pending), size):
+            idxs = pending[start : start + size]
+            chunk = [texts[i] for i in idxs]
+            self._run_chunk(chunk, idxs, results)
+            done += len(chunk)
+            if verbose and done - reported >= 50:
+                print(f"[llm_clean] {done}/{len(pending)}")
+                reported = done
+
+        if verbose and pending:
+            ok = sum(1 for i in pending if results[i].from_llm)
+            print(f"[llm_clean] 打标完成 {ok}/{len(pending)} 条（{self.client.usage.report()}）")
+
         return results
 
-    # -------------------------------------------------- 解析
+    def _run_chunk(
+        self, chunk: list[str], idxs: list[int], results: list[CleanResult]
+    ) -> None:
+        """跑一批。失败/漏项时保留占位，绝不丢条目。"""
+        # 先一律置为"漏项"，对齐成功的再覆盖 —— 这样"没被覆盖到"就等价于
+        # "模型没返回这条"，语义明确。**绝不能**默认成 is_ad=False/is_valid=True：
+        # 那等于把"没拿到结果"谎报成"模型判定它不是广告"，是最坏的一种静默错误。
+        for i in idxs:
+            results[i] = CleanResult(error="模型漏项")
 
-    @staticmethod
-    def _parse(raw: str) -> CleanResult:
-        """解析模型输出。即使有 JSON Mode，也要容错 —— 输出被截断是常态。"""
-        data = _loads_tolerant(raw)
+        data, note = self.client.chat_json(SYSTEM_PROMPT, build_user_prompt(chunk))
         if data is None:
-            return CleanResult(raw_output=raw, error="JSON 解析失败")
+            for i in idxs:
+                results[i] = CleanResult(error=note)
+            return
 
-        sentiment = data.get("sentiment_hint")
-        if sentiment not in ("positive", "neutral", "negative"):
-            sentiment = None
+        items = data.get("results")
+        if not isinstance(items, list):
+            # 有的模型会直接把单条结果平铺在最外层（批量=1 时尤其常见）
+            items = [data] if "is_ad" in data or "is_valid" in data else []
+        if not items:
+            for i in idxs:
+                results[i] = CleanResult(error=f"响应里没有 results: {str(data)[:160]}")
+            return
 
-        keywords = data.get("keywords")
-        if isinstance(keywords, str):
-            keywords = [k.strip() for k in keywords.split(",") if k.strip()]
-        elif not isinstance(keywords, list):
-            keywords = []
+        # 对齐逻辑见 align_by_index 的文档 —— 关键是策略整体决定，不能逐条回退
+        for item, local in zip(items, align_by_index(items, len(idxs))):
+            if local is None:
+                continue
+            results[idxs[local]] = parse_item(item)
 
-        return CleanResult(
-            is_ad=_as_bool(data.get("is_ad")),
-            is_valid=_as_bool(data.get("is_valid")),
-            subject=data.get("subject") if data.get("subject") not in ("null", "", None) else None,
-            sentiment_hint=sentiment,
-            keywords=[str(k) for k in keywords][:5],
-            raw_output=raw,
-        )
+
+def parse_item(item: dict) -> CleanResult:
+    """把模型返回的一条 JSON 转成 CleanResult。"""
+    sentiment = item.get("sentiment_hint")
+    if sentiment not in ("positive", "neutral", "negative"):
+        sentiment = None
+
+    keywords = item.get("keywords")
+    if isinstance(keywords, str):
+        keywords = [k.strip() for k in keywords.split(",") if k.strip()]
+    elif not isinstance(keywords, list):
+        keywords = []
+
+    subject = item.get("subject")
+    if subject in ("null", "", None):
+        subject = None
+    else:
+        subject = str(subject)[:256]
+
+    return CleanResult(
+        is_ad=_as_bool(item.get("is_ad")),
+        is_valid=_as_bool(item.get("is_valid")),
+        subject=subject,
+        sentiment_hint=sentiment,
+        keywords=[str(k) for k in keywords][:5],
+        raw_output=None,
+        from_llm=True,
+    )
 
 
 def _as_bool(v: Any) -> bool | None:
@@ -211,57 +230,7 @@ def _as_bool(v: Any) -> bool | None:
     return None
 
 
-def _loads_tolerant(raw: str) -> dict | None:
-    """容错 JSON 解析：直接解 → 剥 markdown 代码块 → 截取首尾大括号 → json_repair。"""
-    if not raw:
-        return None
-
-    try:
-        obj = json.loads(raw)
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        pass
-
-    # 模型有时会套一层 ```json ... ```
-    stripped = raw.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.split("\n", 1)[-1]
-        if stripped.endswith("```"):
-            stripped = stripped[:-3]
-        try:
-            obj = json.loads(stripped.strip())
-            return obj if isinstance(obj, dict) else None
-        except json.JSONDecodeError:
-            pass
-
-    # 截取第一个 { 到最后一个 }
-    start, end = raw.find("{"), raw.rfind("}")
-    if start != -1 and end > start:
-        try:
-            obj = json.loads(raw[start : end + 1])
-            return obj if isinstance(obj, dict) else None
-        except json.JSONDecodeError:
-            pass
-
-    # 最后手段：json_repair 修复被截断/污染的 JSON
-    try:
-        from json_repair import repair_json
-
-        obj = repair_json(raw, return_objects=True)
-        return obj if isinstance(obj, dict) else None
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------- 工厂
-
-
 def get_cleaner() -> LLMCleaner | None:
-    """获取清洗器。不可用时返回 None，调用方跳过该环节。"""
-    cleaner = LLMCleaner()
-    ok, msg = cleaner.available()
-    if not ok:
-        print(f"[llm_clean] 跳过 LLM 清洗: {msg}")
-        return None
-    print(f"[llm_clean] 使用模型 {cleaner._resolved_model or cleaner.model}")
-    return cleaner
+    """获取打标器。未配置/未启用时返回 None，调用方跳过该环节。"""
+    client = get_client()
+    return LLMCleaner(client) if client else None

@@ -21,6 +21,7 @@ from Whochat.analysis.sentiment import get_analyzer
 from Whochat.config import RAW_DIR
 from Whochat.crawler.base import CrawlTask, resolve_source
 from Whochat.pipeline import dedup as dedup_mod
+from Whochat.pipeline.llm_clean import CleanResult, get_cleaner
 from Whochat.pipeline.rules import clean, extract_keywords, is_spam
 from Whochat.store.models import utcnow
 from Whochat.store.repository import Repository
@@ -38,23 +39,49 @@ class PipelineStats:
     dropped_spam: int = 0
     dropped_dup: int = 0
     analyzed: int = 0
+    # LLM 实际打标成功的条数。0 表示没配 LLM 或全部失败 —— 这两种情况
+    # 在报告里必须能区分开，否则"没配"会被误读成"配了但没生效"。
+    llm_tagged: int = 0
     errors: list[str] = field(default_factory=list)
 
     def report(self) -> str:
-        return (
-            f"采集 内容 {self.crawled_contents} / 评论 {self.crawled_comments}\n"
-            f"落库 内容 {self.stored_contents} / 评论 {self.stored_comments} / 快照 {self.snapshots}\n"
-            f"过滤 广告 {self.dropped_spam} / 重复 {self.dropped_dup}\n"
-            f"分析 {self.analyzed} 条"
-        )
+        lines = [
+            f"采集 内容 {self.crawled_contents} / 评论 {self.crawled_comments}",
+            f"落库 内容 {self.stored_contents} / 评论 {self.stored_comments} / 快照 {self.snapshots}",
+            f"过滤 广告 {self.dropped_spam} / 重复 {self.dropped_dup}",
+            f"分析 {self.analyzed} 条",
+        ]
+        # 没配 LLM 时不打印这一行，免得 demo 的输出跟以前不一样
+        if self.llm_tagged:
+            lines.append(f"LLM 打标 {self.llm_tagged} 条")
+        return "\n".join(lines)
 
 
 class Pipeline:
-    def __init__(self, repo: Repository | None = None, version: str | None = None):
+    def __init__(
+        self,
+        repo: Repository | None = None,
+        version: str | None = None,
+        use_llm: bool = True,
+    ):
         self.repo = repo or Repository()
         self.analyzer = get_analyzer()
-        # 版本号包含后端名 —— 换模型后结果不会被旧数据覆盖，且可对比
-        self.version = version or f"{self.analyzer.name}-v1"
+
+        # LLM 打标（广告/主体/关键词）。没配 base_url+api_key 时为 None，
+        # 整条链路照常跑 —— 它必须是纯可选的。
+        self.cleaner = get_cleaner() if use_llm else None
+
+        # 版本号包含后端名 —— 换模型后结果不会被旧数据覆盖，且可对比。
+        #
+        # 用了 LLM 就打上 -llm 标记，**绝不能和纯词典法的结果混在同一个版本号里**：
+        # 否则同一批数据里一半带 LLM 的 subject/keywords、一半没有，
+        # 事后无法区分"这批分析到底经没经过模型"，对比实验也就做不了。
+        # 这也顺带保住了 demo 的幂等性 —— LLM 是概率性的，它的产出不该
+        # 悄悄改变纯规则链路的历史结果。
+        base = version or f"{self.analyzer.name}-v1"
+        self.version = f"{base}-llm" if self.cleaner else base
+        self._llm_used = 0  # 真正经过模型的条数，用于报告
+        self._llm_by_id: dict[str, CleanResult] = {}
 
     # ============================================================ 采集
 
@@ -129,6 +156,11 @@ class Pipeline:
         重复孪生兄弟已经入库，去重池里没有它，它这次反而会被当正常评论
         分析掉。每重跑一次就多放进来一批本该被过滤的评论，情感统计越跑越脏。
         """
+        # 每次调用都重置：analyze() 可能被反复调用，残留上一轮的映射
+        # 会让评论贴上别人的标签，且完全静默
+        self._llm_by_id: dict[str, CleanResult] = {}
+        self._llm_used = 0
+
         pending = self.repo.comments_for_analysis(self.version, limit=limit)
         if not pending:
             return [], [], []
@@ -170,8 +202,67 @@ class Pipeline:
         else:
             self._last_dup_count = 0
 
+        # 先落规则法的计数，再跑 LLM —— _llm_tag 会在这个基础上累加它自己
+        # 判定出来的广告数。顺序反过来会被这里的赋值覆盖掉。
         self._last_spam_count = spam_count
+
+        # LLM 打标：广告/无效判定 + 主体 + 关键词。
+        # 放在规则清洗和去重**之后**，只对幸存者花 token —— 省钱，
+        # 而且模型看不到那些已经被规则挡掉的垃圾。
+        kept, texts = self._llm_tag(kept, texts, rejected)
+
         return kept, texts, rejected
+
+    def _llm_tag(
+        self, kept: list, texts: list[str], rejected: list
+    ) -> tuple[list, list[str]]:
+        """LLM 打标。任何异常都不影响主流程，绝不能因为模型故障丢数据。"""
+        if not self.cleaner or not kept:
+            return kept, texts
+
+        try:
+            results = self.cleaner.clean_batch(texts)
+        except Exception as e:  # 兜底：clean_batch 设计上不抛，但不能赌
+            print(f"[pipeline] LLM 打标失败，跳过: {type(e).__name__}: {e}")
+            return kept, texts
+
+        if len(results) != len(kept):
+            # 长度对不上就整体放弃 —— zip 会静默截断，标签错位比不打标严重得多
+            print(
+                f"[pipeline] LLM 返回 {len(results)} 条与输入 {len(kept)} 条不匹配，"
+                "本轮跳过 LLM 打标"
+            )
+            return kept, texts
+
+        survived, survived_texts = [], []
+        dropped_ad = 0
+        for comment, text, res in zip(kept, texts, results):
+            if not res.from_llm:
+                # 漏项/失败：放行且不贴标签。**绝不**因为模型没返回就丢掉这条评论
+                survived.append(comment)
+                survived_texts.append(text)
+                continue
+
+            self._llm_by_id[comment.comment_id] = res
+            if res.is_ad is True:
+                rejected.append((comment, "spam"))
+                dropped_ad += 1
+                continue
+            if res.is_valid is False:
+                rejected.append((comment, "invalid"))
+                continue
+            survived.append(comment)
+            survived_texts.append(text)
+
+        self._llm_used = len(self._llm_by_id)
+        # 模型判定的广告也要计入"过滤广告" —— 只统计规则那一份会漏报，
+        # 让报告里的数字和实际被排除的量对不上
+        self._last_spam_count += dropped_ad
+        print(
+            f"[pipeline] LLM 打标 {self._llm_used} 条"
+            f" / 模型判定广告 {dropped_ad} 条"
+        )
+        return survived, survived_texts
 
     # ============================================================ 分析
 
@@ -194,15 +285,25 @@ class Pipeline:
         if comments:
             results = self.analyzer.analyze_batch(texts)
             for comment, text, sent in zip(comments, texts, results):
+                llm = self._llm_by_id.get(comment.comment_id)
                 rows.append(
                     {
                         "item_id": comment.comment_id,
                         "item_type": "comment",
                         "analysis_version": self.version,
                         "cleaned_text": text,
+                        # 情感判定**始终**走分析器，LLM 不参与 —— ADR#5。
+                        # LLM 抽的关键词是"这条在说什么"，比 TF-IDF 的高频词有用；
+                        # 但它偶尔会返回空，此时回落到规则抽取而不是留空。
                         "sentiment_label": sent.label,
                         "sentiment_score": sent.score,
-                        "keywords": extract_keywords(text, top_k=8),
+                        "keywords": (
+                            llm.keywords
+                            if llm is not None and llm.keywords
+                            else extract_keywords(text, top_k=8)
+                        ),
+                        "subject": llm.subject if llm is not None else None,
+                        "is_ad": llm.is_ad if llm is not None else None,
                         "is_valid": True,
                         "processed_at": utcnow(),
                     }
@@ -230,6 +331,7 @@ class Pipeline:
 
         self.repo.save_analysis(rows)
         stats.analyzed = len(comments)  # 只统计真正分析的条数，不含淘汰
+        stats.llm_tagged = self._llm_used
         print(
             f"[pipeline] 已写入 {len(rows)} 条分析结果"
             f"（其中有效 {len(comments)}）版本 {self.version}"

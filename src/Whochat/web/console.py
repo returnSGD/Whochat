@@ -88,7 +88,9 @@ def status_strip() -> None:
         f"采集后端 MediaCrawler {'就绪' if (settings.crawl.mediacrawler_dir / 'main.py').exists() else '未安装'}",
         f"企微 {'已配置' if settings.alert.wecom_webhook else '未配置（dry-run）'}",
         f"情感后端 `{settings.sentiment.backend}`",
-        f"LLM 清洗 {'开' if settings.llm.enabled else '关'}",
+        # 用 is_enabled 而不是 enabled：后者是三态（None = 没显式设过，
+        # 此时按"配齐了就自动开"判定）。直接读 enabled 会把自动开启误显示成"关"。
+        f"LLM 分析 {'开' if settings.llm.is_enabled else '关'}",
     ]
     st.caption(" · ".join(bits))
 
@@ -197,7 +199,6 @@ def tab_clean() -> None:
 
     from Whochat.crawler.base import anonymize_id
     from Whochat.pipeline import dedup as dedup_mod
-    from Whochat.pipeline.llm_clean import LLMCleaner
     from Whochat.pipeline.rules import clean, is_spam, tokenize
 
     c1, c2, c3 = st.columns(3)
@@ -205,12 +206,28 @@ def tab_clean() -> None:
     c2.metric("单次上限", settings.crawl.max_items)
     c3.metric("二级评论", "开" if settings.crawl.include_sub_comments else "关")
 
-    ok, msg = LLMCleaner().available()
     has_minhash = dedup_mod.minhash_dedupe(["文本"]) is not None
     st.caption(
-        f"本地 LLM：{'就绪' if ok else '未就绪'}（{msg}） · "
         f"近重复去重：{'MinHash/LSH' if has_minhash else 'SimHash 回退（未装 datasketch）'}"
     )
+
+    st.markdown("#### LLM 分析")
+    cfg = settings.llm
+    if not cfg.configured:
+        st.info(
+            "未配置 LLM（可选）。在 `.env` 里填 **只两个值** 即可启用：\n\n"
+            "```\nWHOCHAT_LLM_BASE_URL=https://api.deepseek.com/v1\n"
+            "WHOCHAT_LLM_API_KEY=sk-xxxxxxxx\n```\n"
+            "模型名可留空，会自动挑一个对话模型。"
+        )
+    else:
+        st.caption(f"接口：`{cfg.base_url}` · 模型：`{cfg.model or '自动选择'}`")
+        if st.button("测试连接", key="llm_ping"):
+            from Whochat.pipeline.llm_client import LLMClient
+
+            with st.spinner("正在请求…"):
+                ok, msg = LLMClient().available()
+            (st.success if ok else st.error)(msg)
 
     st.divider()
     st.markdown("#### 规则试跑")

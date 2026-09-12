@@ -19,8 +19,10 @@ web = ["streamlit>=1.40", "pandas>=2.2"]
 viz = ["wordcloud>=1.9.3", "matplotlib>=3.8"]
 # 情感分析（torch 很重，按需装）
 sentiment = ["transformers>=4.44", "torch>=2.4"]
-# 本地模型清洗
-llm = ["ollama>=0.4", "instructor>=1.5", "json-repair>=0.30"]
+# LLM 分析。注意**没有 openai/ollama SDK** —— 我们直接走 HTTP 调
+# OpenAI 兼容接口（requests 本来就是核心依赖），所以配两个环境变量就能用，
+# 不需要额外装包。这里只有 json-repair 是真正用到的：模型输出被截断是常态。
+llm = ["json-repair>=0.30"]
 # 近重复去重
 dedup = ["datasketch>=1.6"]
 # 调度

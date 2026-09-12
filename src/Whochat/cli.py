@@ -77,10 +77,17 @@ def cmd_init(args) -> int:
     else:
         print()
 
-    from Whochat.pipeline.llm_clean import LLMCleaner
+    from Whochat.pipeline.llm_client import LLMClient
 
-    ok, msg = LLMCleaner().available()
-    print(f"  本地模型清洗: {'就绪' if ok else '未就绪'} — {msg}")
+    cfg = settings.llm
+    if not cfg.configured:
+        print("  LLM 分析    : 未配置（可选）")
+        print("               → 填 WHOCHAT_LLM_BASE_URL 与 WHOCHAT_LLM_API_KEY 即可启用")
+    elif not cfg.is_enabled:
+        print("  LLM 分析    : 已配置但被关闭（WHOCHAT_LLM_ENABLED=false）")
+    else:
+        ok, msg = LLMClient().available()
+        print(f"  LLM 分析    : {'就绪' if ok else '不可用'} — {msg}")
 
     from Whochat.analysis import topics
 
@@ -266,10 +273,13 @@ def cmd_import(args) -> int:
         return 1
 
     repo = _repo()
-    src = register_manual(path, args.platform)
+    src = register_manual(path, args.platform, llm_map=args.llm_map)
 
     task = CrawlTask(platform=args.platform, mode="keyword", target=args.keyword)
     stats = Pipeline(repo).crawl(task, source_name=src.name)
+
+    if args.llm_map:
+        print(f"字段映射: {src.field_map_note}")
 
     _banner("导入完成")
     print(stats.report())
@@ -314,6 +324,14 @@ def cmd_topics(args) -> int:
 
     if not result.ok:
         return 1
+
+    # LLM 命名（可选）。聚类出来的是 c-TF-IDF 关键词碎片，"发热 / 续航 / 掉电"
+    # 这种标签只能算线索，不是人能直接用的主题名。
+    if not args.no_llm:
+        from Whochat.pipeline.llm_client import get_client
+
+        named, note = topics.name_topics(result, client=get_client())
+        print(f"LLM 主题命名: {note}" if named else f"跳过 LLM 主题命名: {note}")
 
     for t in result.topics[:20]:
         print(f"  [{t.doc_count:>4}] {t.label}")
@@ -516,6 +534,11 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("path", help="文件路径")
     i.add_argument("--platform", default="unknown")
     i.add_argument("--keyword", default=None)
+    i.add_argument(
+        "--llm-map",
+        action="store_true",
+        help="字段名陌生时，先让 LLM 学一遍到我们 schema 的映射再导入",
+    )
     i.set_defaults(func=cmd_import)
 
     a = sub.add_parser("analyze", help="清洗 + 去重 + 情感分析")
@@ -527,6 +550,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--version", default=None)
     t.add_argument("--keyword", default=None)
     t.add_argument("--min-topic-size", type=int, default=5)
+    t.add_argument("--no-llm", action="store_true", help="跳过 LLM 主题命名")
     t.set_defaults(func=cmd_topics)
 
     w = sub.add_parser("wordcloud", help="生成词云")

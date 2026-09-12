@@ -45,6 +45,11 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "y", "on", "是")
 
 
+def _env_bool_or_none(name: str) -> bool | None:
+    """三态布尔：没设返回 None，用于「显式开关优先，否则自动判断」。"""
+    return None if os.getenv(name) is None else _env_bool(name)
+
+
 DATA_DIR = _abs_from_root(os.getenv("WHOCHAT_DATA_DIR") or ROOT / "data")
 RAW_DIR = DATA_DIR / "raw"
 DB_DIR = DATA_DIR / "db"
@@ -109,16 +114,54 @@ class CrawlConfig:
 
 @dataclass
 class LLMConfig:
-    """本地模型清洗配置（Ollama）。"""
+    """LLM 分析配置 —— 任何 **OpenAI 兼容**接口都能用。
 
-    enabled: bool = _env_bool("WHOCHAT_LLM_ENABLED")
-    base_url: str = os.getenv("WHOCHAT_LLM_BASE_URL", "http://127.0.0.1:11434")
-    model: str = os.getenv("WHOCHAT_LLM_MODEL", "qwen2.5:14b-instruct-q4_K_M")
-    # 清洗是确定性任务，温度必须为 0
+    最小配置就是两个值，模型名可以不填（会自动挑）：
+
+        WHOCHAT_LLM_BASE_URL=https://api.deepseek.com/v1
+        WHOCHAT_LLM_API_KEY=sk-xxxxxxxx
+
+    为什么走 OpenAI 兼容协议而不是绑死某一家：这套协议现在是事实标准，
+    DeepSeek / 通义千问 / Moonshot / 智谱 / OpenAI / 以及本地 Ollama 的
+    `/v1` 端点全都实现了它。换供应商只改 base_url，代码一行不动 ——
+    和 `CrawlerSource` 协议是同一个思路（方案文档 ADR#1 的教训）。
+
+    ⚠️ 显存提示：本机是 RTX 3060 Laptop（6GB）。14B q4 约 9GB，**装不下**。
+    想跑本地模型得用 7B q4（~4.7GB，勉强）或 3B/4B。
+    """
+
+    # 三态：显式设了 WHOCHAT_LLM_ENABLED 就用它；没设则"配齐了就自动开"
+    enabled: bool | None = _env_bool_or_none("WHOCHAT_LLM_ENABLED")
+    base_url: str = os.getenv("WHOCHAT_LLM_BASE_URL", "").strip()
+    api_key: str = os.getenv("WHOCHAT_LLM_API_KEY", "").strip()
+    # 留空 → 自动从 GET /models 里挑一个；挑不出来会明确报错让你填
+    model: str = os.getenv("WHOCHAT_LLM_MODEL", "").strip()
+    # 清洗/打标是确定性任务，温度必须为 0
     temperature: float = 0.0
     timeout: int = int(os.getenv("WHOCHAT_LLM_TIMEOUT", "120"))
-    # 批量清洗时每批多少条
-    batch_size: int = int(os.getenv("WHOCHAT_LLM_BATCH", "1"))
+    # 每次请求塞多少条文本。批量是省钱的关键（1 次请求 vs K 次），
+    # 但太大容易让模型漏项/截断，所以给个保守默认。
+    batch_size: int = int(os.getenv("WHOCHAT_LLM_BATCH", "10"))
+    # 失败重试次数（指数退避，429/5xx/超时才重试）
+    max_retries: int = int(os.getenv("WHOCHAT_LLM_RETRIES", "3"))
+    # 每分钟最多几次请求，0 = 不限。给免费额度小的供应商留个刹车
+    max_requests_per_minute: int = int(os.getenv("WHOCHAT_LLM_RPM", "0"))
+
+    @property
+    def is_enabled(self) -> bool:
+        """没显式开关时：只要 base_url 与 api_key 都填了就算开启。
+
+        「只填请求地址和 key 就能用」这条承诺靠的就是这个默认值 ——
+        不该再让人去翻文档找那个额外的开关。
+        """
+        if self.enabled is not None:
+            return self.enabled
+        return bool(self.base_url and self.api_key)
+
+    @property
+    def configured(self) -> bool:
+        """是否配齐了必要项（不看显式开关）。"""
+        return bool(self.base_url and self.api_key)
 
 
 @dataclass

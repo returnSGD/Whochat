@@ -142,20 +142,30 @@ def _first_nonempty(*values: Any) -> Any:
 # ---------------------------------------------------------------- 归一化
 
 
-def normalize_content(raw: dict, platform: str, keyword: str | None = None) -> dict | None:
-    """平台原始内容 → RawContent 记录。缺关键字段则返回 None。"""
-    content_id = pick(raw, CONTENT_ALIASES["content_id"])
+def normalize_content(
+    raw: dict,
+    platform: str,
+    keyword: str | None = None,
+    aliases: dict[str, list[str]] | None = None,
+) -> dict | None:
+    """平台原始内容 → RawContent 记录。缺关键字段则返回 None。
+
+    `aliases` 用于传入 LLM 学到的扩展别名表（见 `crawler/llm_map.py`）。
+    不传就用内置的手写别名表 —— 那条路径的行为完全不变。
+    """
+    A = aliases or CONTENT_ALIASES
+    content_id = pick(raw, A["content_id"])
     if not content_id:
         return None
 
-    title = pick(raw, CONTENT_ALIASES["title"])
-    body = pick(raw, CONTENT_ALIASES["body_text"])
+    title = pick(raw, A["title"])
+    body = pick(raw, A["body_text"])
 
     # 有些平台把标题塞在 desc 里，避免两者完全重复
     if title and body and str(title).strip() == str(body).strip():
         title = None
 
-    ctype = pick(raw, CONTENT_ALIASES["content_type"])
+    ctype = pick(raw, A["content_type"])
     if isinstance(ctype, int):
         ctype = {1: "video", 2: "note"}.get(ctype, str(ctype))
 
@@ -166,28 +176,34 @@ def normalize_content(raw: dict, platform: str, keyword: str | None = None) -> d
         content_type=str(ctype) if ctype else None,
         title=clean_text_basic(str(title)) if title else None,
         body_text=clean_text_basic(str(body)) if body else None,
-        url=pick(raw, CONTENT_ALIASES["url"]),
-        publish_time=pick(raw, CONTENT_ALIASES["publish_time"]),
+        url=pick(raw, A["url"]),
+        publish_time=pick(raw, A["publish_time"]),
         # 必须传 author_raw_id：content_record 内部做脱敏后再写 author_id。
         # 若这里直接传 author_id=，它会被 content_record 的 **kwargs 展开覆盖，
         # 平台原始用户 ID 就原样落库了。
-        author_raw_id=pick(raw, CONTENT_ALIASES["author_id"]),
-        author_name=pick(raw, CONTENT_ALIASES["author_name"]),
-        author_follower_count=parse_count(pick(raw, CONTENT_ALIASES["author_follower_count"])),
-        author_verified=parse_bool(pick(raw, CONTENT_ALIASES["author_verified"])),
-        like_count=parse_count(pick(raw, CONTENT_ALIASES["like_count"])),
-        comment_count=parse_count(pick(raw, CONTENT_ALIASES["comment_count"])),
-        share_count=parse_count(pick(raw, CONTENT_ALIASES["share_count"])),
-        collect_count=parse_count(pick(raw, CONTENT_ALIASES["collect_count"])),
-        parent_content_id=pick(raw, CONTENT_ALIASES["parent_content_id"]),
+        author_raw_id=pick(raw, A["author_id"]),
+        author_name=pick(raw, A["author_name"]),
+        author_follower_count=parse_count(pick(raw, A["author_follower_count"])),
+        author_verified=parse_bool(pick(raw, A["author_verified"])),
+        like_count=parse_count(pick(raw, A["like_count"])),
+        comment_count=parse_count(pick(raw, A["comment_count"])),
+        share_count=parse_count(pick(raw, A["share_count"])),
+        collect_count=parse_count(pick(raw, A["collect_count"])),
+        parent_content_id=pick(raw, A["parent_content_id"]),
         raw_json=raw,  # 全量存档 —— 采集不可逆，这是唯一的后悔药
     )
 
 
-def normalize_comment(raw: dict, platform: str, content_id: str | None = None) -> dict | None:
-    """平台原始评论 → Comment 记录。"""
-    comment_id = pick(raw, COMMENT_ALIASES["comment_id"])
-    text = pick(raw, COMMENT_ALIASES["text"])
+def normalize_comment(
+    raw: dict,
+    platform: str,
+    content_id: str | None = None,
+    aliases: dict[str, list[str]] | None = None,
+) -> dict | None:
+    """平台原始评论 → Comment 记录。`aliases` 同上。"""
+    A = aliases or COMMENT_ALIASES
+    comment_id = pick(raw, A["comment_id"])
+    text = pick(raw, A["text"])
     if not comment_id or not text:
         return None
 
@@ -199,7 +215,7 @@ def normalize_comment(raw: dict, platform: str, content_id: str | None = None) -
     if not parent_content:
         return None
 
-    parent_comment = pick(raw, COMMENT_ALIASES["parent_comment_id"])
+    parent_comment = pick(raw, A["parent_comment_id"])
     # bilibili 的顶层评论固定写 parent_comment_id="0"（字符串），
     # pick 认为非空 → 一级评论被全量误标成 level=2 并挂到不存在的父 "0"。
     if parent_comment is not None and str(parent_comment).strip() in ("", "0"):
@@ -211,14 +227,14 @@ def normalize_comment(raw: dict, platform: str, content_id: str | None = None) -
         content_id=str(parent_content),
         platform=platform,
         text=str(text),
-        author_raw_id=pick(raw, COMMENT_ALIASES["author_id"]),
+        author_raw_id=pick(raw, A["author_id"]),
         parent_comment_id=str(parent_comment) if parent_comment else None,
-        reply_to_comment_id=pick(raw, COMMENT_ALIASES["reply_to_comment_id"]),
+        reply_to_comment_id=pick(raw, A["reply_to_comment_id"]),
         level=level,
-        publish_time=pick(raw, COMMENT_ALIASES["publish_time"]),
-        author_follower_count=parse_count(pick(raw, COMMENT_ALIASES["author_follower_count"])),
-        like_count=parse_count(pick(raw, COMMENT_ALIASES["like_count"])),
-        reply_count=parse_count(pick(raw, COMMENT_ALIASES["reply_count"])),
-        ip_location=pick(raw, COMMENT_ALIASES["ip_location"]),
+        publish_time=pick(raw, A["publish_time"]),
+        author_follower_count=parse_count(pick(raw, A["author_follower_count"])),
+        like_count=parse_count(pick(raw, A["like_count"])),
+        reply_count=parse_count(pick(raw, A["reply_count"])),
+        ip_location=pick(raw, A["ip_location"]),
         raw_json=raw,
     )

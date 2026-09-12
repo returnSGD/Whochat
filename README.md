@@ -24,7 +24,7 @@ python -m Whochat.cli dashboard          # → http://localhost:8501
 #   /           看板端 —— 只读：趋势/情感/主题/词云/传播/预警记录（默认页）
 #   /console    操作端 —— 可写：L1~L5 触发与微调（采集/分析/规则/推送）
 
-# 4. 回归测试（192 个用例，约 22 秒）
+# 4. 回归测试（278 个用例，约 64 秒）
 python -m pytest -q
 ```
 
@@ -75,12 +75,68 @@ python -m Whochat.cli status
 
 ---
 
+## LLM 分析（可选，只填两个值）
+
+任何 **OpenAI 兼容**接口都能用。在 `.env` 里填这两行就生效，**不需要额外装包**
+（直接走 HTTP 调，`requests` 本来就是核心依赖）：
+
+```bash
+WHOCHAT_LLM_BASE_URL=https://api.deepseek.com/v1
+WHOCHAT_LLM_API_KEY=sk-xxxxxxxxxxxxxxxx
+```
+
+**模型名可以留空** —— 会自动调 `GET /models` 挑一个对话模型（会跳过 embedding /
+rerank / whisper 这类非对话模型），挑不出来会明确报错让你填 `WHOCHAT_LLM_MODEL`。
+base_url 只写到域名也行（`https://api.deepseek.com`），会在
+`{base}/chat/completions` 与 `{base}/v1/chat/completions` 之间自动探测一次并缓存。
+
+配置完用 `python -m Whochat.cli init` 自检，应显示：
+
+```
+LLM 分析    : 就绪 · 模型 deepseek-chat（自动选择（候选 42 个））
+```
+
+### 它做什么 / 不做什么
+
+| 做 | 不做 |
+|---|---|
+| **广告识别** —— 判**意图**而不是关键词（"商家刷单太明显了"是在批评，不是广告；纯正则会误杀） | **情感判定** —— ADR#5。永远走词典法，实测比模型更准（90.9% vs 60.6%） |
+| **主体识别** —— 这条在骂哪个产品/型号（`subject` 字段，规则完全做不到） | 声量统计 —— 必须是精确计数 |
+| **关键词抽取** —— "这条在说什么"，比 TF-IDF 高频词有用 | 快通道预警 —— 那条链路的设计前提就是"无模型、秒级" |
+| **主题命名** —— 把 `发热 / 续航 / 掉电` 归纳成「屏幕发热与续航」 | |
+| **字段映射**（`import --llm-map`）—— 字段名陌生的数据集，学一次就能导入 | |
+
+### 三个必须知道的行为
+
+1. **版本隔离**：开启 LLM 后，分析结果写入 `lexicon-v1-llm`，与原有的
+   `lexicon-v1` **并存**，不覆盖。事后能对比"用没用模型"的差异。
+2. **demo 的幂等性只对未开启 LLM 时成立** —— 模型是概率性的。跑回归基线时
+   请关掉 LLM。
+3. **漏项不丢数据**：模型少返回几条时，那几条会**继续被正常分析**，只是不带
+   LLM 标签。丢数据比少打一个标严重得多（有测试钉死）。
+
+### 成本
+
+批量请求（默认一次 10 条）。1 万条评论约 1000 次请求。可用
+`WHOCHAT_LLM_BATCH` 调批大小、`WHOCHAT_LLM_RPM` 限速、`WHOCHAT_LLM_TIMEOUT` 调超时。
+跑完会打印 token 用量。
+
+> ⚠️ 访问境外 API（OpenAI 等）需要代理：设 `HTTPS_PROXY=http://127.0.0.1:7897`。
+> 采集流量与它是分开的，不会互相影响（见 §2.3 的代理分工）。
+
+> ⚠️ **本机想跑本地模型的话**：RTX 3060 Laptop 只有 **6GB 显存**，
+> Qwen2.5-14B q4 约 9GB **装不下**。要用 7B q4（~4.7GB，勉强）或 3B/4B。
+> 本地 Ollama 也走同一套：`WHOCHAT_LLM_BASE_URL=http://127.0.0.1:11434/v1`，
+> key 随便填（它不校验）。
+
+---
+
 ## 架构
 
 ```
 L1 采集    MediaCrawler(Playwright) · MockSource · ManualImport
               ↓  CrawlerSource 协议 ← 唯一的解耦点
-L2 清洗    规则清洗 → 精确去重 → MinHash/SimHash 近重复 → 本地LLM结构化(可选)
+L2 清洗    规则清洗 → 精确去重 → MinHash/SimHash 近重复 → LLM 打标(可选)
               ↓
        ┌──────┴──────┐
        ↓ 快通道       ↓ 慢通道
@@ -107,7 +163,7 @@ L5 预警   聚合·分级·冷却      L6 看板  FastAPI/Streamlit :8501
 | 2 | **国内平台采集不走代理** | 代理 IP 特征反而触发风控；出口地域跳变与登录态冲突。7897 只用于下载 |
 | 3 | 只取评论区文本 | 评论区是情绪最集中处，信噪比高于视频正文 |
 | 4 | **采集层抓全字段** | 采集不可逆，分析可重跑。`parent_content_id`/`follower_count` 事后补不回来（内容已删） |
-| 5 | LLM 只做清洗打标，不判情感 | 情感是封闭分类任务，小模型更快更准。用 LLM 逐条判是拿大炮打蚊子 |
+| 5 | LLM 只做打标，不判情感 | 情感是封闭分类任务，词典法更快更准更可复现。用 LLM 逐条判是拿大炮打蚊子（实测：transformer 60.6% vs 词典 90.9%） |
 | 6 | 预警走**快慢双通道** | 等模型清洗完再告警，时效性已丧失（行业标准 30 秒~分钟级） |
 | 7 | 不建真"数据中台" | 单人本地工具，过度工程化是最大死因。但要保留存储/展示边界 |
 | 8 | 编排用 APScheduler，不用 Airflow | Windows 本机开发，Airflow 需 WSL/Docker 且过重 |
@@ -125,7 +181,9 @@ L5 预警   聚合·分级·冷却      L6 看板  FastAPI/Streamlit :8501
 | 字段归一化 | `crawler/normalize.py` | 别名表 + 多候选回退，含 `"1.2万"` → `12000` 解析 |
 | 规则清洗 | `pipeline/rules.py` | 清洗、广告识别、分词、关键词抽取 |
 | 去重 | `pipeline/dedup.py` | 精确(SHA256) + 近重复(MinHash/SimHash 分桶) |
-| 本地 LLM | `pipeline/llm_clean.py` | Ollama + Qwen，Ollama 不可用时静默跳过 |
+| LLM 客户端 | `pipeline/llm_client.py` | 任意 **OpenAI 兼容**接口（只填 base_url + api_key）；端点/模型自动探测、重试退避、JSON Mode 降级、用量统计 |
+| LLM 打标 | `pipeline/llm_clean.py` | 广告识别（看意图不只看关键词）/ 主体识别 / 关键词抽取；**批量 + 序号对齐，漏项不丢数据** |
+| LLM 字段映射 | `crawler/llm_map.py` | 字段名陌生的平台：学一次「原始字段 → schema」并落盘缓存，泛化别名表覆盖不到的情况 |
 | 情感分析 | `analysis/sentiment.py` | 词典法(子串扫描+否定+程度+转折) / Transformer 双后端 |
 | 主题建模 | `analysis/topics.py` | BERTopic（中文嵌入模型降级链）+ **零下载离线方案**兜底 |
 | 时序 | `analysis/timeseries.py` | 爆发检测、阶段划分、情感漂移、KOL |
@@ -199,6 +257,10 @@ positive  [+0.928, +0.999]
 | 主题建模需 ≥100 文档 | 小样本 BERTopic 会退化成一堆碎片主题。文档数 <20 时直接拒绝并说明原因 |
 | **HuggingFace 可达性不稳定** | 嵌入模型下载会失败。此时自动降级到 **TF-IDF+SVD+HDBSCAN 离线方案**（零下载），效果弱于 BERTopic 但功能不报废。联网后重跑即可提升。**现状**：`text2vec-base-chinese` 已缓存到本地，在线 BERTopic 路径已验证可用（断网时仍自动回退离线方案） |
 | 传播分析依赖采集字段 | 没抓 `parent_content_id` 就做不了，且**事后补不回来** |
+| LLM 输出是概率性的 | 同一条文本两次调用可能给不同标签。所以它只做**打标**（可容忍抖动），不参与情感判定与声量统计 |
+| LLM 会自动挑模型 | 挑的是"符合偏好表的第一个对话模型"，**不代表最适合你**。不确定就显式填 `WHOCHAT_LLM_MODEL` |
+| **LLM 打标结果未在真实数据上评估过** | 现有测试用的是本地假服务，验证的是**契约**（不漏项、不错位、不丢数据），**不是准确率**。广告识别比正则好在哪、差在哪，需要你自己的标注集来测 |
+| 字段映射可能学错 | 已有防护（只认 schema 内字段、别名表优先、一个目标只认一次），但**学错仍会往库里写错数据**。缓存文件在 `data/llm_field_map.json`，可直接查看/删除重学 |
 | 免费代理池不好用 | 可用率低、生命周期短。真要规模化得买国内住宅代理 |
 
 ---
@@ -221,9 +283,9 @@ src/Whochat/
 │   └── console.py         操作端（L1~L5 控制与微调）
 └── scheduler/             L0 编排（APScheduler）
 dicts/                     停用词 / 敏感词 / 情感词 / jieba 自定义词典
-data/                      SQLite、原始 JSONL、导出物
+data/                      SQLite、原始 JSONL、导出物、LLM 字段映射缓存
 vendor/MediaCrawler/       采集基座（git clone，未修改）
-tests/                     pytest 用例（183 个）+ 情感标注集
+tests/                     pytest 用例（278 个）+ 情感标注集
 ```
 
 词典分工（`dicts/`）：
